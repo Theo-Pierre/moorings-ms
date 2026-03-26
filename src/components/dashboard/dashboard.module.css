@@ -1,0 +1,851 @@
+.dashboardPage {
+  --ink: #0c243f;
+  --ink-soft: #4d647d;
+  --surface: rgba(255, 255, 255, 0.9);
+  --line: rgba(14, 43, 72, 0.14);
+  --ocean-1: #0e7490;
+  --ocean-2: #0369a1;
+  --seafoam: #14b8a6;
+  --critical: #dc2626;
+  --warning: #d97706;
+  --safe: #16a34a;
+  min-height: 100vh;
+  color: var(--ink);
+}
+
+.topNav {
+  position: sticky;
+  top: 0;
+  z-index: 90;
+  backdrop-filter: blur(16px);
+  background: linear-gradient(180deg, rgba(237, 246, 255, 0.9), rgba(237, 246, 255, 0.78));
+  border-bottom: 1px solid rgba(12, 36, 63, 0.11);
+}
+
+.navInner {
+  width: min(1220px, calc(100vw - 2.4rem));
+  margin: 0 auto;
+  min-height: 76px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.brandBlock {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.mainLogo {
+  width: 5.4rem;
+  height: auto;
+  object-fit: contain;
+  filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.16));
+}
+
+.siteName {
+  font-family: var(--font-heading), "Segoe UI", sans-serif;
+  font-size: 1.03rem;
+  letter-spacing: 0.03em;
+  font-weight: 700;
+  text-transform: lowercase;
+}
+
+.siteDate {
+  font-size: 0.75rem;
+  color: var(--ink-soft);
+}
+
+.navLinks {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.navLink {
+  font-size: 0.78rem;
+  font-weight: 640;
+  letter-spacing: 0.02em;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 0.36rem 0.72rem;
+  color: var(--ink-soft);
+  transition: 160ms ease;
+}
+
+.navLink:hover,
+.navLink:focus-visible {
+  color: var(--ink);
+  border-color: rgba(3, 105, 161, 0.25);
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.partnerLogoWrap {
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 999px;
+  border: 1px solid rgba(14, 36, 64, 0.16);
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.partnerLogo {
+  width: 1.8rem;
+  height: 1.8rem;
+  object-fit: contain;
+}
+
+.dashboardBody {
+  width: min(1220px, calc(100vw - 2.4rem));
+  margin: 1.2rem auto 2.4rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.heroSection {
+  border-radius: 1.25rem;
+  border: 1px solid var(--line);
+  background:
+    radial-gradient(circle at 9% 12%, rgba(56, 189, 248, 0.28), transparent 26%),
+    radial-gradient(circle at 95% 82%, rgba(45, 212, 191, 0.23), transparent 30%),
+    linear-gradient(140deg, rgba(255, 255, 255, 0.88), rgba(246, 250, 255, 0.96));
+  box-shadow:
+    0 14px 34px rgba(5, 24, 45, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  padding: 1.05rem;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.heroTitle {
+  font-family: var(--font-heading), "Segoe UI", sans-serif;
+  font-size: clamp(1.14rem, 2.8vw, 1.72rem);
+  line-height: 1.1;
+  margin-bottom: 0.38rem;
+}
+
+.heroSubtitle {
+  font-size: 0.86rem;
+  color: var(--ink-soft);
+  max-width: 70ch;
+}
+
+.heroBadge {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.46rem;
+  border-radius: 999px;
+  border: 1px solid rgba(14, 116, 144, 0.35);
+  padding: 0.44rem 0.72rem;
+  font-size: 0.73rem;
+  font-weight: 650;
+  color: #0f4c68;
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.svgIcon {
+  width: 1rem;
+  height: 1rem;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.summaryGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.9rem;
+}
+
+.summaryCard,
+.panelCard,
+.chartCard,
+.sourceCard,
+.figureCard,
+.scheduleCard,
+.insightCard {
+  border-radius: 1rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.summaryCard {
+  padding: 0.82rem;
+  display: grid;
+  gap: 0.35rem;
+  animation: fadeRise 320ms ease;
+}
+
+.summaryHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.summaryTitle {
+  font-size: 0.79rem;
+  font-weight: 650;
+  color: #2c4a67;
+}
+
+.iconPill {
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 0.64rem;
+  display: grid;
+  place-items: center;
+  color: #0f7d91;
+  border: 1px solid rgba(20, 184, 166, 0.26);
+  background: rgba(230, 250, 248, 0.9);
+}
+
+.summaryValue {
+  font-family: var(--font-heading), "Segoe UI", sans-serif;
+  font-size: clamp(1.38rem, 3.2vw, 1.9rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.summaryDetail {
+  font-size: 0.73rem;
+  color: var(--ink-soft);
+}
+
+.panelCard {
+  padding: 0.95rem;
+  box-shadow: 0 10px 30px rgba(6, 29, 53, 0.07);
+}
+
+.panelHeaderSplit {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-bottom: 0.8rem;
+}
+
+.sectionTitle {
+  font-size: 1.02rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  margin-bottom: 0.2rem;
+}
+
+.sectionHint {
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+}
+
+.tabGroup {
+  display: inline-flex;
+  gap: 0.35rem;
+  background: rgba(238, 245, 255, 0.75);
+  border: 1px solid rgba(5, 24, 45, 0.1);
+  border-radius: 999px;
+  padding: 0.23rem;
+}
+
+.tabButton {
+  border: 0;
+  background: transparent;
+  border-radius: 999px;
+  font-size: 0.73rem;
+  font-weight: 650;
+  color: var(--ink-soft);
+  padding: 0.34rem 0.72rem;
+  cursor: pointer;
+  transition: 150ms ease;
+}
+
+.tabButton:hover,
+.tabButton:focus-visible {
+  color: var(--ink);
+}
+
+.tabButtonActive {
+  background: linear-gradient(135deg, var(--ocean-1), var(--ocean-2));
+  color: #f7fcff;
+  box-shadow: 0 8px 20px rgba(3, 105, 161, 0.35);
+}
+
+.scheduleGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(260px, 1fr);
+  gap: 0.8rem;
+}
+
+.scheduleList {
+  display: grid;
+  gap: 0.62rem;
+}
+
+.scheduleCard {
+  padding: 0.72rem;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 252, 255, 0.9));
+}
+
+.scheduleCardPinned {
+  border-color: rgba(2, 132, 199, 0.72);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+}
+
+.scheduleTopRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.62rem;
+}
+
+.scheduleBoat {
+  font-size: 0.92rem;
+  font-weight: 680;
+}
+
+.scheduleMeta {
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+  margin-top: 0.12rem;
+}
+
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0.3rem 0.58rem;
+  font-size: 0.67rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+}
+
+.badgeCritical {
+  color: #7f1d1d;
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(254, 226, 226, 0.88);
+}
+
+.badgeHigh {
+  color: #854d0e;
+  border-color: rgba(234, 179, 8, 0.44);
+  background: rgba(254, 249, 195, 0.88);
+}
+
+.badgeMedium,
+.badgeSafe {
+  color: #14532d;
+  border-color: rgba(34, 197, 94, 0.34);
+  background: rgba(220, 252, 231, 0.9);
+}
+
+.progressWrap {
+  position: relative;
+  height: 0.52rem;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.24);
+  margin-top: 0.58rem;
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--ocean-1), var(--seafoam));
+  transition: width 260ms ease;
+}
+
+.progressText,
+.scheduleReason {
+  font-size: 0.74rem;
+  color: var(--ink-soft);
+}
+
+.progressText {
+  margin-top: 0.26rem;
+}
+
+.scheduleReason {
+  margin-top: 0.3rem;
+}
+
+.roleChipWrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.38rem;
+}
+
+.roleChip {
+  border-radius: 999px;
+  border: 1px solid rgba(3, 105, 161, 0.2);
+  background: rgba(236, 253, 255, 0.95);
+  color: #125c73;
+  font-size: 0.66rem;
+  font-weight: 650;
+  padding: 0.2rem 0.55rem;
+}
+
+.startsPanel {
+  border-radius: 1rem;
+  border: 1px solid var(--line);
+  background: rgba(248, 251, 255, 0.85);
+  padding: 0.74rem;
+}
+
+.sideTitle {
+  font-size: 0.86rem;
+  margin-bottom: 0.46rem;
+}
+
+.figureList {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.figureCard {
+  padding: 0.58rem;
+}
+
+.figureCategory {
+  font-size: 0.73rem;
+  font-weight: 700;
+}
+
+.figureStats {
+  margin-top: 0.2rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+  font-size: 0.67rem;
+  color: var(--ink-soft);
+}
+
+.reportGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(260px, 1fr);
+  gap: 0.82rem;
+}
+
+.chartCard {
+  padding: 0.76rem;
+  background: rgba(249, 253, 255, 0.95);
+}
+
+.chartHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.chartHeader h3 {
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.chartHeader p {
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+  margin: 0;
+}
+
+.chartSvg {
+  width: 100%;
+  margin-top: 0.52rem;
+  border-radius: 0.85rem;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(238, 248, 255, 0.94));
+}
+
+.chartAxis {
+  stroke: rgba(51, 65, 85, 0.25);
+  stroke-width: 1;
+}
+
+.jobsLine,
+.completionLine {
+  fill: none;
+  stroke-width: 3;
+}
+
+.jobsLine {
+  stroke: #0284c7;
+}
+
+.completionLine {
+  stroke: #0d9488;
+  stroke-dasharray: 6 6;
+}
+
+.jobsDot {
+  fill: #0369a1;
+}
+
+.completionDot {
+  fill: #0f766e;
+}
+
+.chartLabel {
+  fill: #64748b;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.chartLegend {
+  margin-top: 0.44rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  font-size: 0.7rem;
+  color: #48617d;
+}
+
+.chartLegend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.legendJobs,
+.legendCompletion,
+.legendCritical {
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.legendJobs {
+  background: #0284c7;
+}
+
+.legendCompletion {
+  background: #0d9488;
+}
+
+.legendCritical {
+  background: #dc2626;
+}
+
+.chartReadout {
+  margin-top: 0.48rem;
+  font-size: 0.75rem;
+  color: var(--ink-soft);
+}
+
+.pieWrap {
+  margin-top: 0.6rem;
+  display: grid;
+  gap: 0.78rem;
+}
+
+.pie {
+  width: min(210px, 100%);
+  aspect-ratio: 1;
+  border-radius: 999px;
+  margin: 0 auto;
+  border: 1px solid rgba(30, 41, 59, 0.2);
+  box-shadow: inset 0 0 0 28px rgba(255, 255, 255, 0.84);
+}
+
+.pieLegend {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.pieLegendButton {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 0.72rem;
+  background: rgba(255, 255, 255, 0.82);
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.36rem 0.45rem;
+  font-size: 0.72rem;
+  color: #2e4b67;
+  cursor: pointer;
+}
+
+.pieLegendButtonActive {
+  border-color: rgba(3, 105, 161, 0.45);
+  box-shadow: 0 6px 16px rgba(2, 132, 199, 0.15);
+}
+
+.pieSwatch {
+  width: 0.74rem;
+  height: 0.74rem;
+  border-radius: 999px;
+}
+
+.insightGrid {
+  display: grid;
+  gap: 0.52rem;
+}
+
+.insightCard {
+  display: flex;
+  gap: 0.52rem;
+  align-items: flex-start;
+  padding: 0.62rem;
+  font-size: 0.78rem;
+  color: #18334e;
+}
+
+.insightCritical {
+  border-left: 4px solid var(--critical);
+}
+
+.insightWarning {
+  border-left: 4px solid var(--warning);
+}
+
+.insightPositive {
+  border-left: 4px solid var(--safe);
+}
+
+.insightNeutral {
+  border-left: 4px solid #64748b;
+}
+
+.searchWrap {
+  display: inline-flex;
+}
+
+.searchInput {
+  min-width: 210px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.2);
+  background: rgba(255, 255, 255, 0.9);
+  padding: 0.42rem 0.82rem;
+  font-size: 0.78rem;
+  color: var(--ink);
+  outline: none;
+}
+
+.searchInput:focus {
+  border-color: rgba(2, 132, 199, 0.72);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.tableWrap {
+  overflow-x: auto;
+}
+
+.fleetTable {
+  width: 100%;
+  min-width: 780px;
+  border-collapse: collapse;
+}
+
+.fleetTable th,
+.fleetTable td {
+  padding: 0.7rem 0.58rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.24);
+  text-align: left;
+}
+
+.fleetTable th {
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.fleetTable td {
+  font-size: 0.79rem;
+  color: #1f3b57;
+}
+
+.actionButtons {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.36rem;
+}
+
+.actionButton,
+.actionButtonGhost,
+.downloadButton {
+  border-radius: 999px;
+  font-size: 0.67rem;
+  font-weight: 680;
+  padding: 0.32rem 0.6rem;
+  border: 1px solid rgba(2, 132, 199, 0.35);
+  transition: 150ms ease;
+}
+
+.actionButton,
+.downloadButton {
+  color: #f8fbff;
+  background: linear-gradient(135deg, #0284c7, #0ea5e9);
+}
+
+.actionButton {
+  cursor: pointer;
+}
+
+.actionButtonGhost {
+  color: #155e75;
+  background: rgba(236, 254, 255, 0.88);
+}
+
+.actionButton:hover,
+.actionButton:focus-visible,
+.actionButtonGhost:hover,
+.actionButtonGhost:focus-visible,
+.downloadButton:hover,
+.downloadButton:focus-visible {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(2, 132, 199, 0.22);
+}
+
+.sourcesList {
+  display: grid;
+  gap: 0.52rem;
+}
+
+.sourceCard {
+  padding: 0.72rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.sourceName {
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.sourceMeta {
+  font-size: 0.7rem;
+  color: var(--ink-soft);
+}
+
+.sourceActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.recordsBadge {
+  border-radius: 999px;
+  padding: 0.24rem 0.54rem;
+  font-size: 0.66rem;
+  font-weight: 680;
+  background: rgba(219, 234, 254, 0.86);
+  color: #1d4ed8;
+  border: 1px solid rgba(59, 130, 246, 0.28);
+}
+
+@keyframes fadeRise {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 1040px) {
+  .navInner,
+  .dashboardBody {
+    width: min(1220px, calc(100vw - 1.4rem));
+  }
+
+  .summaryGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .scheduleGrid,
+  .reportGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .heroSection {
+    flex-direction: column;
+  }
+
+  .heroBadge {
+    align-self: flex-start;
+  }
+}
+
+@media (max-width: 760px) {
+  .navInner {
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    padding: 0.4rem 0;
+  }
+
+  .brandBlock {
+    order: 1;
+  }
+
+  .navLinks {
+    order: 3;
+    width: 100%;
+  }
+
+  .partnerLogoWrap {
+    order: 2;
+  }
+
+  .summaryGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .panelHeaderSplit {
+    flex-direction: column;
+  }
+
+  .tabGroup {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .tabButton {
+    flex: 1;
+    text-align: center;
+    padding: 0.44rem 0.4rem;
+  }
+
+  .searchInput {
+    min-width: 100%;
+    width: 100%;
+  }
+
+  .sourceCard {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .sourceActions {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
