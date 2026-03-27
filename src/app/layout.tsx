@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Manrope, Outfit } from "next/font/google";
+import mooringsLogo from "@/assets/moorings-logo.png";
 
 import "./globals.css";
 
@@ -20,9 +21,9 @@ export const metadata: Metadata = {
   description:
     "Moorings fleet turnaround scheduling and reporting dashboard powered by CSV/XLSX operational reports.",
   icons: {
-    icon: "/assets/moorings-logo.png",
-    shortcut: "/assets/moorings-logo.png",
-    apple: "/assets/moorings-logo.png",
+    icon: mooringsLogo.src,
+    shortcut: mooringsLogo.src,
+    apple: mooringsLogo.src,
   },
 };
 

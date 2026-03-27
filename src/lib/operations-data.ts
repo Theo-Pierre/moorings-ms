@@ -177,10 +177,6 @@ export interface OperationsDashboardData {
     shipwrights: WorkerQualityReport[];
   };
   sources: SourceReference[];
-  logos: {
-    primary: string;
-    secondary: string;
-  };
 }
 
 interface RoleState {
@@ -441,10 +437,6 @@ export const getOperationsDashboardData = cache((): OperationsDashboardData => {
         note: "Reference scheduling format from operations team",
       },
     ],
-    logos: {
-      primary: "/assets/moorings-logo.png",
-      secondary: "/assets/sunsail-logo.png",
-    },
   };
 });
 

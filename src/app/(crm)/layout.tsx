@@ -7,7 +7,7 @@ export default function CrmLayout({ children }: { children: React.ReactNode }) {
   const data = getOperationsDashboardData();
 
   return (
-    <CrmShell appName={data.appName} reportDateLabel={data.reportDateLabel} logos={data.logos}>
+    <CrmShell appName={data.appName} reportDateLabel={data.reportDateLabel}>
       {children}
     </CrmShell>
   );

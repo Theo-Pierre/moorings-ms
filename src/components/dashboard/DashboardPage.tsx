@@ -2,6 +2,8 @@
 
 import { useMemo, useState } from "react";
 import Image from "next/image";
+import mooringsLogo from "@/assets/moorings-logo.png";
+import sunsailLogo from "@/assets/sunsail-logo.png";
 
 import type {
   OperationsDashboardData,
@@ -69,7 +71,7 @@ export function DashboardPage({ data }: DashboardPageProps) {
         <div className={styles.navInner}>
           <a href="#top" className={styles.brandBlock}>
             <Image
-              src={data.logos.primary}
+              src={mooringsLogo}
               width={130}
               height={72}
               alt="Moorings logo"
@@ -99,7 +101,7 @@ export function DashboardPage({ data }: DashboardPageProps) {
 
           <div className={styles.partnerLogoWrap}>
             <Image
-              src={data.logos.secondary}
+              src={sunsailLogo}
               width={42}
               height={42}
               alt="Sunsail partner logo"

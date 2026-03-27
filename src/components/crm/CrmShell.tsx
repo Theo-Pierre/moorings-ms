@@ -1,5 +1,7 @@
 "use client";
 
+import mooringsLogo from "@/assets/moorings-logo.png";
+import sunsailLogo from "@/assets/sunsail-logo.png";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -10,10 +12,6 @@ import styles from "./crm.module.css";
 interface CrmShellProps {
   appName: string;
   reportDateLabel: string;
-  logos: {
-    primary: string;
-    secondary: string;
-  };
   children: React.ReactNode;
 }
 
@@ -26,7 +24,7 @@ const navItems = [
   { href: "/reports", label: "Reports", icon: "wave" as const },
 ];
 
-export function CrmShell({ appName, reportDateLabel, logos, children }: CrmShellProps) {
+export function CrmShell({ appName, reportDateLabel, children }: CrmShellProps) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -60,7 +58,7 @@ export function CrmShell({ appName, reportDateLabel, logos, children }: CrmShell
     <div className={styles.crmFrame}>
       <aside className={styles.sidebar}>
         <Link href="/" className={styles.sidebarBrand}>
-          <Image src={logos.primary} width={132} height={72} alt="Moorings" className={styles.brandLogo} priority />
+          <Image src={mooringsLogo} width={132} height={72} alt="Moorings" className={styles.brandLogo} priority />
           <div>
             <p className={styles.brandName}>{appName}</p>
             <p className={styles.brandMeta}>Ops date: {reportDateLabel}</p>
@@ -68,7 +66,7 @@ export function CrmShell({ appName, reportDateLabel, logos, children }: CrmShell
         </Link>
 
         <div className={styles.sidebarPartner}>
-          <Image src={logos.secondary} width={36} height={36} alt="Sunsail" className={styles.partnerLogo} />
+          <Image src={sunsailLogo} width={36} height={36} alt="Sunsail" className={styles.partnerLogo} />
           <span>Fleet partner</span>
         </div>
 
@@ -80,7 +78,7 @@ export function CrmShell({ appName, reportDateLabel, logos, children }: CrmShell
       <div className={styles.mainColumn}>
         <header className={styles.mobileHeader}>
           <Link href="/" className={styles.mobileBrand}>
-            <Image src={logos.primary} width={84} height={46} alt="Moorings" className={styles.mobileBrandLogo} priority />
+            <Image src={mooringsLogo} width={84} height={46} alt="Moorings" className={styles.mobileBrandLogo} priority />
             <div>
               <p className={styles.mobileBrandName}>{appName}</p>
               <p className={styles.mobileBrandMeta}>{reportDateLabel}</p>
