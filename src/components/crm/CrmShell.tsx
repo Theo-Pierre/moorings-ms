@@ -98,6 +98,15 @@ export function CrmShell({ appName, reportDateLabel, children }: CrmShellProps) 
         </header>
 
         {mobileOpen ? (
+          <button
+            type="button"
+            className={styles.mobileBackdrop}
+            aria-label="Close mobile navigation"
+            onClick={() => setMobileOpen(false)}
+          />
+        ) : null}
+
+        {mobileOpen ? (
           <nav id="mobile-crm-nav" className={styles.mobileDropdown} aria-label="Mobile CRM navigation">
             {navContent}
           </nav>
