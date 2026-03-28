@@ -1,8 +1,8 @@
 import { WorkersPage } from "@/components/crm";
 import { getOperationsDashboardData } from "@/lib/operations-data";
 
-export default function RiggersRoute() {
-  const data = getOperationsDashboardData();
+export default async function RiggersRoute() {
+  const data = await getOperationsDashboardData();
 
   return (
     <WorkersPage

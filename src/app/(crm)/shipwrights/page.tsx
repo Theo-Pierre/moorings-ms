@@ -1,8 +1,8 @@
 import { WorkersPage } from "@/components/crm";
 import { getOperationsDashboardData } from "@/lib/operations-data";
 
-export default function ShipwrightsRoute() {
-  const data = getOperationsDashboardData();
+export default async function ShipwrightsRoute() {
+  const data = await getOperationsDashboardData();
 
   return (
     <WorkersPage
