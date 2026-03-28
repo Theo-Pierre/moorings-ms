@@ -38,6 +38,7 @@ export function CrmShell({ appName, reportDateLabel, children }: CrmShellProps) 
             <li key={item.href}>
               <Link
                 href={item.href}
+                prefetch
                 className={active ? `${styles.sidebarLink} ${styles.sidebarLinkActive}` : styles.sidebarLink}
                 onClick={() => setMobileOpen(false)}
               >
@@ -57,7 +58,7 @@ export function CrmShell({ appName, reportDateLabel, children }: CrmShellProps) 
   return (
     <div className={styles.crmFrame}>
       <aside className={styles.sidebar}>
-        <Link href="/" className={styles.sidebarBrand}>
+        <Link href="/" prefetch className={styles.sidebarBrand}>
           <Image src={mooringsLogo} width={132} height={72} alt="Moorings" className={styles.brandLogo} priority />
           <div>
             <p className={styles.brandName}>{appName}</p>
@@ -77,7 +78,7 @@ export function CrmShell({ appName, reportDateLabel, children }: CrmShellProps) 
 
       <div className={styles.mainColumn}>
         <header className={styles.mobileHeader}>
-          <Link href="/" className={styles.mobileBrand}>
+          <Link href="/" prefetch className={styles.mobileBrand}>
             <Image src={mooringsLogo} width={84} height={46} alt="Moorings" className={styles.mobileBrandLogo} priority />
             <div>
               <p className={styles.mobileBrandName}>{appName}</p>

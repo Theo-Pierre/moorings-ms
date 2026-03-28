@@ -1,21 +1,14 @@
 import "server-only";
 
-import { cache } from "react";
 import fs from "node:fs";
 import path from "node:path";
 import * as XLSX from "xlsx";
 
-const csvPath = path.join(process.cwd(), "data", "drive", "turnaround_plan (1).csv");
-const workbookPath = path.join(
-  process.cwd(),
-  "data",
-  "drive",
-  "BVI Turnaround Schedule Mar 26th,  2026.xlsx",
-);
-
 type RoleStatus = 0 | 1 | 2;
 
 type Priority = "Critical" | "High" | "Medium";
+export type CharterPriorityLevel = "owner" | "ownerBerth" | "none";
+export type CharterPriorityFlag = "O" | "OB" | null;
 
 export interface SummaryMetric {
   id: string;
@@ -53,6 +46,8 @@ export interface FleetRow {
   completionPct: number;
   pendingRoles: number;
   status: "Critical" | "Watch" | "On track";
+  charterPriority: CharterPriorityLevel;
+  charterPriorityFlag: CharterPriorityFlag;
   detailLink: string | null;
 }
 
@@ -108,6 +103,8 @@ export interface AssignmentPlanItem {
   timeWindow: string;
   priority: Priority;
   completionPct: number;
+  charterPriority: CharterPriorityLevel;
+  charterPriorityFlag: CharterPriorityFlag;
   rigger: AssignedWorker;
   shipwright: AssignedWorker;
   rationale: string;
@@ -126,6 +123,8 @@ export interface VesselQualityReport {
   criticalTurnarounds: number;
   qualityScore: number;
   risk: "Critical" | "Watch" | "On track";
+  charterPriority: CharterPriorityLevel;
+  charterPriorityFlag: CharterPriorityFlag;
   assignedRigger: string;
   assignedShipwright: string;
   pendingRoles: string[];
@@ -153,6 +152,54 @@ export interface WorkerQualityReport {
   pie: PieSlice[];
 }
 
+type WorkforceRoleKey = "technicians" | "riggers" | "shipwrights" | "acTechs";
+
+export interface RoleCapacitySnapshot {
+  roleKey: WorkforceRoleKey;
+  roleLabel: "Technician" | "Rigger" | "Shipwright" | "AC Tech";
+  perWorkerCapacity: number;
+  totalWorkers: number;
+  availableWorkers: number;
+  offWorkers: number;
+  availableWorkerNames: string[];
+  capacity: number;
+  demand: number;
+  shortageBoats: number;
+  shortageWorkers: number;
+  surplusBoats: number;
+}
+
+export interface DailyPlanningSnapshot {
+  dateIso: string;
+  dateLabel: string;
+  demandBoats: number;
+  bottleneckRole: string;
+  totalCapacityBoats: number;
+  status: "shortage" | "sufficient" | "surplus";
+  roles: RoleCapacitySnapshot[];
+  recommendations: string[];
+}
+
+export interface OperationalStoryBlock {
+  dateIso: string;
+  dateLabel: string;
+  demandBoats: number;
+  completedBoats: number;
+  inProgressBoats: number;
+  missedBoats: number;
+  completionRate: number;
+  workloadVsCapacity: string;
+  narrative: string;
+}
+
+export interface PlanningEngineData {
+  today: DailyPlanningSnapshot;
+  tomorrow: DailyPlanningSnapshot;
+  horizon: DailyPlanningSnapshot[];
+  recommendations: string[];
+  alerts: string[];
+}
+
 export interface OperationsDashboardData {
   appName: string;
   reportDateIso: string;
@@ -172,6 +219,12 @@ export interface OperationsDashboardData {
   insights: InsightItem[];
   assignmentPlan: AssignmentPlanItem[];
   vesselReports: VesselQualityReport[];
+  operationalNarrative: {
+    yesterday: OperationalStoryBlock;
+    today: OperationalStoryBlock;
+    tomorrow: OperationalStoryBlock;
+  };
+  planningEngine: PlanningEngineData;
   workerReports: {
     riggers: WorkerQualityReport[];
     shipwrights: WorkerQualityReport[];
@@ -198,9 +251,14 @@ interface TurnaroundEntry {
   completedRoles: number;
   pendingRoles: number;
   inProgressRoles: number;
+  charterPriority: CharterPriorityLevel;
+  charterPriorityFlag: CharterPriorityFlag;
+  charterer: string;
 }
 
 interface CurrentDayMovement {
+  dateIso?: string;
+  stat?: string;
   section: string;
   type: "end" | "start";
   boatName: string;
@@ -217,57 +275,52 @@ interface CurrentDayData {
   movements: CurrentDayMovement[];
 }
 
-const roleMap = [
-  {
-    key: "qc",
-    label: "Quality Check",
-    statusColumn: "qc_status",
-    assigneeColumn: "qc",
-    updatedAtColumn: "qc_atc_time",
-  },
-  {
-    key: "riggers",
-    label: "Riggers",
-    statusColumn: "Riggers_status",
-    assigneeColumn: "Riggers",
-    updatedAtColumn: "Riggers_atc_time",
-  },
-  {
-    key: "shipwright",
-    label: "Shipwright",
-    statusColumn: "Shipwright_status",
-    assigneeColumn: "Shipwright",
-    updatedAtColumn: "Shipwright_atc_time",
-  },
-  {
-    key: "cleanerAbove",
-    label: "Cleaner Above Deck",
-    statusColumn: "Cleaner above deck_status",
-    assigneeColumn: "Cleaner above deck",
-    updatedAtColumn: "Cleaner above deck_atc_time",
-  },
-  {
-    key: "cleanerBelow",
-    label: "Cleaner Below Deck",
-    statusColumn: "Cleaner below deck_status",
-    assigneeColumn: "Cleaner below deck",
-    updatedAtColumn: "Cleaner below deck_atc_time",
-  },
-  {
-    key: "safety",
-    label: "Safety Equipment",
-    statusColumn: "Safety Equipment_status",
-    assigneeColumn: "Safety Equipment",
-    updatedAtColumn: "Safety Equipment_atc_time",
-  },
-  {
-    key: "technician",
-    label: "Technician",
-    statusColumn: "Technician_status",
-    assigneeColumn: "Technician",
-    updatedAtColumn: "Technician_atc_time",
-  },
-] as const;
+const defaultDriveFolderId = "1ruGoaCaIeceFItLbeMsgcJtlHyMeBott";
+const bundledDriveDataDir = path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "drive");
+const runtimeDriveDataDir =
+  process.env.MOORINGS_RUNTIME_DATA_DIR?.trim() ||
+  path.join("/tmp", "moorings-ms", "drive-cache");
+const autoSyncEnabled = process.env.MOORINGS_AUTO_SYNC !== "false";
+const autoSyncIntervalMinutes = clampNumber(
+  Number(process.env.MOORINGS_SYNC_INTERVAL_MINUTES || "10"),
+  1,
+  360,
+);
+const autoSyncIntervalMs = autoSyncIntervalMinutes * 60 * 1000;
+const dashboardCacheIntervalMs = clampNumber(
+  Number(process.env.MOORINGS_DASHBOARD_CACHE_SECONDS || "45"),
+  5,
+  3600,
+) * 1000;
+
+interface DriveFolderEntry {
+  id: string;
+  href: string;
+  name: string;
+  modifiedLabel: string;
+  isFolder: boolean;
+}
+
+interface SyncedDriveFile {
+  id: string;
+  name: string;
+  localPath: string;
+  downloadUrl: string;
+}
+
+interface RemoteDriveFileMetadata {
+  lastModifiedMs: number;
+  sizeBytes: number;
+}
+
+interface DriveSyncSnapshot {
+  syncedAtIso: string;
+  files: {
+    bviWorkbook?: SyncedDriveFile;
+    techWorkbook?: SyncedDriveFile;
+    bookPdf?: SyncedDriveFile;
+  };
+}
 
 const dayTimeSlots = [
   "06:00-07:30",
@@ -280,9 +333,94 @@ const dayTimeSlots = [
   "17:00-18:30",
 ];
 
-export const getOperationsDashboardData = cache((): OperationsDashboardData => {
-  const turnaroundEntries = safeReadTurnaroundCsv();
-  const currentDay = safeReadCurrentDayWorkbook();
+const roleCapacityRules: ReadonlyArray<{
+  key: WorkforceRoleKey;
+  label: RoleCapacitySnapshot["roleLabel"];
+  perWorkerCapacity: number;
+}> = [
+  { key: "technicians", label: "Technician", perWorkerCapacity: 3 },
+  { key: "riggers", label: "Rigger", perWorkerCapacity: 9 },
+  { key: "shipwrights", label: "Shipwright", perWorkerCapacity: 5 },
+  { key: "acTechs", label: "AC Tech", perWorkerCapacity: 5 },
+];
+
+interface DailyTargetRow {
+  dateIso: string;
+  section: string;
+  type: string;
+  size: string;
+  boatName: string;
+  lastCharterDateIso: string;
+  daysUntilNextCharter: string;
+  nextCharterDateIso: string;
+  nextCharterStartTime: string;
+  technicalCompletionRaw: string;
+  cleaningCompletionRaw: string;
+}
+
+interface TechWorkerProfile {
+  id: number;
+  label: string;
+  daysOff: Set<string>;
+}
+
+interface WorkerPools {
+  technicians: TechWorkerProfile[];
+  riggers: TechWorkerProfile[];
+  shipwrights: TechWorkerProfile[];
+  acTechs: TechWorkerProfile[];
+}
+
+interface VesselCharterPriority {
+  level: CharterPriorityLevel;
+  flag: CharterPriorityFlag;
+  charterer: string;
+}
+
+interface ParsedOperationsSource {
+  entries: TurnaroundEntry[];
+  currentDay: CurrentDayData;
+  workerPools: WorkerPools;
+  workerDirectory: {
+    riggers: Map<number, string>;
+    shipwrights: Map<number, string>;
+  };
+  sources: SourceReference[];
+  startsByDate: Map<string, CurrentDayMovement[]>;
+}
+
+let dashboardCache: { expiresAt: number; data: OperationsDashboardData } | null = null;
+let dashboardRefreshPromise: Promise<OperationsDashboardData> | null = null;
+let driveSyncCache: { expiresAt: number; snapshot: DriveSyncSnapshot | null } | null = null;
+let driveSyncPromise: Promise<DriveSyncSnapshot | null> | null = null;
+
+export async function getOperationsDashboardData(): Promise<OperationsDashboardData> {
+  const now = Date.now();
+  if (dashboardCache && dashboardCache.expiresAt > now) {
+    return dashboardCache.data;
+  }
+
+  if (!dashboardRefreshPromise) {
+    dashboardRefreshPromise = loadOperationsDashboardData()
+      .then((data) => {
+        dashboardCache = {
+          data,
+          expiresAt: Date.now() + dashboardCacheIntervalMs,
+        };
+        return data;
+      })
+      .finally(() => {
+        dashboardRefreshPromise = null;
+      });
+  }
+
+  return dashboardRefreshPromise;
+}
+
+async function loadOperationsDashboardData(): Promise<OperationsDashboardData> {
+  const sourceData = await safeReadOperationsSourceData();
+  const turnaroundEntries = sourceData.entries;
+  const currentDay = sourceData.currentDay;
 
   const reportDate = currentDay.reportDate;
   const previousDate = addDays(reportDate, -1);
@@ -292,11 +430,13 @@ export const getOperationsDashboardData = cache((): OperationsDashboardData => {
   const previousIso = toIsoDate(previousDate);
   const nextIso = toIsoDate(nextDate);
 
-  const todayRows = turnaroundEntries.filter((entry) => entry.dateIso === reportDateIso);
-  const previousRows = turnaroundEntries.filter(
-    (entry) => entry.dateIso === previousIso,
-  );
-  const tomorrowRows = turnaroundEntries.filter((entry) => entry.dateIso === nextIso);
+  const todayRowsRaw = turnaroundEntries.filter((entry) => entry.dateIso === reportDateIso);
+  const previousRowsRaw = turnaroundEntries.filter((entry) => entry.dateIso === previousIso);
+  const tomorrowRowsRaw = turnaroundEntries.filter((entry) => entry.dateIso === nextIso);
+
+  const todayRows = todayRowsRaw;
+  const previousRows = previousRowsRaw;
+  const tomorrowRows = tomorrowRowsRaw;
 
   const carryoverRows = previousRows.filter((entry) => entry.completionPct < 100);
 
@@ -326,39 +466,54 @@ export const getOperationsDashboardData = cache((): OperationsDashboardData => {
     limit: 12,
   });
 
-  const startsTotal = currentDay.startsFigures.reduce((sum, figure) => sum + figure.total, 0);
-  const yesterdayCompletion = averageCompletion(previousRows);
-  const tomorrowAtRisk = tomorrowRows.filter((entry) => entry.completionPct < 35).length;
+  const planningEngine = buildPlanningEngine({
+    entries: turnaroundEntries,
+    workerPools: sourceData.workerPools,
+    reportDate,
+  });
+  const operationalNarrative = buildOperationalNarrative({
+    previousRows,
+    todayRows,
+    tomorrowRows,
+    planningEngine,
+    reportDate,
+  });
+  const tomorrowShortages = planningEngine.tomorrow.roles.filter(
+    (role) => role.shortageWorkers > 0,
+  );
 
   const summaryMetrics: SummaryMetric[] = [
     {
       id: "dueToday",
-      label: "Boats Due Today",
-      value: String(todayRows.length),
-      detail: `${carryoverRows.length} carryovers from ${formatDate(previousDate)}`,
+      label: "Today's Target Boats",
+      value: String(planningEngine.today.demandBoats),
+      detail: `${operationalNarrative.today.inProgressBoats} currently in progress`,
     },
     {
-      id: "startsPlanned",
-      label: "Starts Planned",
-      value: String(startsTotal),
-      detail: `${currentDay.startsFigures.length} operating categories`,
+      id: "capacityToday",
+      label: "Today's Capacity",
+      value: String(planningEngine.today.totalCapacityBoats),
+      detail: `Bottleneck role: ${planningEngine.today.bottleneckRole}`,
     },
     {
-      id: "yesterdayCompletion",
-      label: "Yesterday Completion",
-      value: `${Math.round(yesterdayCompletion)}%`,
-      detail: `${previousRows.length} turnaround plans reviewed`,
+      id: "tomorrowDemand",
+      label: "Tomorrow Demand",
+      value: String(planningEngine.tomorrow.demandBoats),
+      detail: `${planningEngine.tomorrow.totalCapacityBoats} boats of role-balanced capacity`,
     },
     {
-      id: "tomorrowRisk",
-      label: "Tomorrow At Risk",
-      value: String(tomorrowAtRisk),
-      detail: `${tomorrowRows.length} boats scheduled for ${formatDate(nextDate)}`,
+      id: "tomorrowStatus",
+      label: "Tomorrow Workforce Check",
+      value: tomorrowShortages.length > 0 ? "Gap" : "Sufficient",
+      detail:
+        tomorrowShortages.length > 0
+          ? `${tomorrowShortages.length} role shortages detected`
+          : "All core roles meet target demand",
     },
   ];
 
   const fleetRows = buildFleetRows(todayRows, tomorrowRows);
-  const insights = buildInsights(previousRows, todayRows, tomorrowRows, carryoverRows);
+  const insights = buildPlanningInsights(planningEngine, operationalNarrative);
 
   const reports = buildReports(turnaroundEntries, reportDate);
   const planningCandidates = dedupeByBoat([
@@ -377,6 +532,7 @@ export const getOperationsDashboardData = cache((): OperationsDashboardData => {
     roleName: "Rigger",
     reportDate,
     plannedLoads: plannedLoads.riggers,
+    workerLabels: sourceData.workerDirectory.riggers,
   });
   const shipwrightReports = buildWorkerQualityReports({
     entries: turnaroundEntries,
@@ -384,6 +540,7 @@ export const getOperationsDashboardData = cache((): OperationsDashboardData => {
     roleName: "Shipwright",
     reportDate,
     plannedLoads: plannedLoads.shipwrights,
+    workerLabels: sourceData.workerDirectory.shipwrights,
   });
   const assignmentPlan = buildAssignmentPlan({
     candidates: planningCandidates,
@@ -410,86 +567,45 @@ export const getOperationsDashboardData = cache((): OperationsDashboardData => {
     insights,
     assignmentPlan,
     vesselReports,
+    operationalNarrative,
+    planningEngine,
     workerReports: {
       riggers: riggerReports,
       shipwrights: shipwrightReports,
     },
-    sources: [
-      {
-        name: "Turnaround Plan CSV",
-        filePath: "data/drive/turnaround_plan (1).csv",
-        downloadUrl: "/reports/turnaround_plan.csv",
-        records: turnaroundEntries.length,
-        note: "Role completion and assignment status per boat",
-      },
-      {
-        name: "BVI Turnaround Schedule",
-        filePath: "data/drive/BVI Turnaround Schedule Mar 26th,  2026.xlsx",
-        downloadUrl: "/reports/bvi_turnaround_schedule.xlsx",
-        records: currentDay.movements.length,
-        note: "Current day starts, ends, and movement timing",
-      },
-      {
-        name: "Booking Schedule Example",
-        filePath: "data/drive/Booking schedule example.xlsx",
-        downloadUrl: "/reports/booking_schedule_example.xlsx",
-        records: 1,
-        note: "Reference scheduling format from operations team",
-      },
-    ],
+    sources: sourceData.sources,
   };
-});
-
-function readTurnaroundCsv(): TurnaroundEntry[] {
-  ensureFileExists(csvPath);
-
-  const csvBuffer = fs.readFileSync(csvPath);
-  const workbook = XLSX.read(csvBuffer, {
-    type: "buffer",
-    raw: false,
-    cellDates: true,
-    dense: true,
-  });
-  const sheetName = workbook.SheetNames[0];
-  const sheet = workbook.Sheets[sheetName];
-
-  const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
-    defval: "",
-    raw: false,
-  });
-
-  return rawRows.map((row) => {
-    const { name: boatName, link: boatLink } = parseBoatName(String(row.boat_name ?? ""));
-    const roleStates: RoleState[] = roleMap.map((role) => ({
-      key: role.key,
-      label: role.label,
-      status: toRoleStatus(row[role.statusColumn]),
-      assigneeId: toNumber(row[role.assigneeColumn]),
-      updatedAtIso: normalizeTimestampValue(row[role.updatedAtColumn]),
-    }));
-
-    const completedRoles = roleStates.filter((role) => role.status === 2).length;
-    const inProgressRoles = roleStates.filter((role) => role.status === 1).length;
-    const pendingRoles = roleStates.length - completedRoles - inProgressRoles;
-    const completionPct =
-      ((completedRoles + inProgressRoles * 0.5) / Math.max(roleStates.length, 1)) * 100;
-
-    return {
-      id: String(row._tas_id ?? `${row.date}-${boatName}`),
-      dateIso: normalizeDateValue(row.date),
-      stat: String(row.stat ?? "").trim() || "Uncoded",
-      boatName,
-      boatLink,
-      roleStates,
-      completionPct,
-      completedRoles,
-      pendingRoles,
-      inProgressRoles,
-    };
-  });
 }
 
-function readCurrentDayWorkbook(): CurrentDayData {
+async function safeReadOperationsSourceData(): Promise<ParsedOperationsSource> {
+  try {
+    return await readOperationsSourceData();
+  } catch (error) {
+    if (process.env.NODE_ENV !== "production") {
+      console.warn("[moorings.ms] Could not read Google Drive source files during this request.", error);
+    }
+    const now = startOfDay(new Date());
+    return {
+      entries: [],
+      currentDay: {
+        reportDate: now,
+        startsFigures: [],
+        movements: [],
+      },
+      workerPools: buildFallbackWorkerPools(),
+      workerDirectory: {
+        riggers: new Map<number, string>(),
+        shipwrights: new Map<number, string>(),
+      },
+      sources: [],
+      startsByDate: new Map<string, CurrentDayMovement[]>(),
+    };
+  }
+}
+
+async function readOperationsSourceData(): Promise<ParsedOperationsSource> {
+  const syncSnapshot = await ensureDriveDataIsFresh();
+  const workbookPath = resolveDriveDataFile(/^BVI Turnaround Schedule.*\.xlsx$/i);
   ensureFileExists(workbookPath);
 
   const workbookBuffer = fs.readFileSync(workbookPath);
@@ -500,9 +616,380 @@ function readCurrentDayWorkbook(): CurrentDayData {
     dense: true,
   });
 
-  const sheet = workbook.Sheets["Current Day"];
+  const dailyTargetRows = parseDailyTargetRows(workbook);
+  const mpParsed = parseMpStartsAndEndsRows(workbook);
+
+  const reportDate = selectOperationalReportDate({
+    currentDayDate: extractCurrentSheetReportDate(workbook),
+    dailyRows: dailyTargetRows,
+    mpStartsByDate: mpParsed.startsByDate,
+  });
+  const reportDateIso = toIsoDate(reportDate);
+
+  const workerPools = readTechWorkerPools();
+  const entries = buildTurnaroundEntries(dailyTargetRows, workerPools, mpParsed.charterPriorityByBoat);
+
+  const reportMovements = mpParsed.movements.filter((movement) => movement.dateIso === reportDateIso);
+  const startsFigures = buildStartsFigures(reportMovements);
+
+  const workbookFile = path.basename(workbookPath);
+  const techWorkbookPath = resolveDriveDataFile(/^Tech Teams by Brand and Schedule.*\.xlsx$/i, true);
+  const bookPdfPath = resolveDriveDataFile(/^Book 2\.pdf$/i, true);
+
+  const uniqueVessels = new Set(entries.map((entry) => normalizeBoatName(entry.boatName)));
+  const sources: SourceReference[] = [
+    {
+      name: "BVI Turnaround Schedule",
+      filePath: filePathLabel(workbookPath, `data/drive/${workbookFile}`),
+      downloadUrl:
+        syncSnapshot?.files.bviWorkbook?.downloadUrl || "/reports/bvi_turnaround_schedule.xlsx",
+      records: dailyTargetRows.length,
+      note: "Primary workbook (MP Starts & Ends + Daily TA Tortola) used for planning and KPI reporting.",
+    },
+  ];
+
+  if (techWorkbookPath) {
+    sources.push({
+      name: "Tech Teams by Brand and Schedule",
+      filePath: filePathLabel(
+        techWorkbookPath,
+        `data/drive/${path.basename(techWorkbookPath)}`,
+      ),
+      downloadUrl:
+        syncSnapshot?.files.techWorkbook?.downloadUrl || "/reports/tech_teams_by_brand.xlsx",
+      records:
+        workerPools.technicians.length +
+        workerPools.riggers.length +
+        workerPools.shipwrights.length +
+        workerPools.acTechs.length,
+      note: "Power-team workforce roster (technicians, riggers, shipwrights, AC techs) used for daily supply and capacity calculations.",
+    });
+  }
+
+  if (bookPdfPath) {
+    sources.push({
+      name: "Book 2 Vessel Reference",
+      filePath: filePathLabel(bookPdfPath, `data/drive/${path.basename(bookPdfPath)}`),
+      downloadUrl: syncSnapshot?.files.bookPdf?.downloadUrl || "/reports/book_2.pdf",
+      records: uniqueVessels.size,
+      note: "Reference vessel document (not treated as live operational updates).",
+    });
+  }
+
+  return {
+    entries,
+    currentDay: {
+      reportDate,
+      startsFigures,
+      movements: reportMovements,
+    },
+    workerPools,
+    workerDirectory: {
+      riggers: new Map(workerPools.riggers.map((worker) => [worker.id, worker.label])),
+      shipwrights: new Map(workerPools.shipwrights.map((worker) => [worker.id, worker.label])),
+    },
+    sources,
+    startsByDate: mpParsed.startsByDate,
+  };
+}
+
+async function ensureDriveDataIsFresh(): Promise<DriveSyncSnapshot | null> {
+  if (!autoSyncEnabled) {
+    return null;
+  }
+
+  const now = Date.now();
+  if (driveSyncCache && driveSyncCache.expiresAt > now) {
+    return driveSyncCache.snapshot;
+  }
+
+  if (!driveSyncPromise) {
+    driveSyncPromise = synchronizeDriveFiles()
+      .then((snapshot) => {
+        driveSyncCache = {
+          snapshot,
+          expiresAt: Date.now() + autoSyncIntervalMs,
+        };
+        return snapshot;
+      })
+      .finally(() => {
+        driveSyncPromise = null;
+      });
+  }
+
+  return driveSyncPromise;
+}
+
+async function synchronizeDriveFiles(): Promise<DriveSyncSnapshot | null> {
+  const folderId = process.env.MOORINGS_DRIVE_FOLDER_ID?.trim() || defaultDriveFolderId;
+
+  let rootEntries: DriveFolderEntry[];
+  try {
+    rootEntries = await fetchDriveFolderEntries(folderId);
+  } catch (error) {
+    if (process.env.NODE_ENV !== "production") {
+      console.warn("[moorings.ms] Failed to read Google Drive folder listing.", error);
+    }
+    return driveSyncCache?.snapshot ?? null;
+  }
+
+  const [bviEntry, techEntry, bookEntry] = await Promise.all([
+    selectLatestDriveFile(rootEntries, /^BVI Turnaround Schedule.*\.xlsx$/i),
+    selectLatestDriveFile(rootEntries, /^Tech Teams by Brand and Schedule.*\.xlsx$/i),
+    selectLatestDriveFile(rootEntries, /^Book 2\.pdf$/i),
+  ]);
+
+  await fs.promises.mkdir(runtimeDriveDataDir, { recursive: true });
+
+  const files: DriveSyncSnapshot["files"] = {};
+
+  if (bviEntry) {
+    const localPath = path.join(runtimeDriveDataDir, "bvi_turnaround_schedule.xlsx");
+    await downloadDriveEntryIfNeeded(bviEntry, localPath);
+    files.bviWorkbook = {
+      id: bviEntry.id,
+      name: bviEntry.name,
+      localPath,
+      downloadUrl: driveFileDownloadUrl(bviEntry.id),
+    };
+  }
+
+  if (techEntry) {
+    const localPath = path.join(runtimeDriveDataDir, "tech_teams_by_brand.xlsx");
+    await downloadDriveEntryIfNeeded(techEntry, localPath);
+    files.techWorkbook = {
+      id: techEntry.id,
+      name: techEntry.name,
+      localPath,
+      downloadUrl: driveFileDownloadUrl(techEntry.id),
+    };
+  }
+
+  if (bookEntry) {
+    const localPath = path.join(runtimeDriveDataDir, "book_2.pdf");
+    await downloadDriveEntryIfNeeded(bookEntry, localPath);
+    files.bookPdf = {
+      id: bookEntry.id,
+      name: bookEntry.name,
+      localPath,
+      downloadUrl: driveFileDownloadUrl(bookEntry.id),
+    };
+  }
+
+  return {
+    syncedAtIso: new Date().toISOString(),
+    files,
+  };
+}
+
+async function fetchDriveFolderEntries(folderId: string): Promise<DriveFolderEntry[]> {
+  const url = `https://drive.google.com/embeddedfolderview?id=${encodeURIComponent(folderId)}#list`;
+  const response = await fetch(url, {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google Drive folder listing request failed (${response.status}).`);
+  }
+
+  const html = await response.text();
+  const chunks = html.split('<div class="flip-entry"').slice(1);
+  const entries: DriveFolderEntry[] = [];
+
+  for (const chunk of chunks) {
+    const idMatch = chunk.match(/id="entry-([^"]+)"/);
+    const hrefMatch = chunk.match(/<a href="([^"]+)"/);
+    const titleMatch = chunk.match(/<div class="flip-entry-title">([\s\S]*?)<\/div>/);
+    const modifiedMatch = chunk.match(
+      /<div class="flip-entry-last-modified"><div>([\s\S]*?)<\/div>/,
+    );
+
+    if (!idMatch || !hrefMatch || !titleMatch) {
+      continue;
+    }
+
+    const href = decodeHtmlEntities(hrefMatch[1] || "").trim();
+    const name = decodeHtmlEntities(stripTags(titleMatch[1] || "")).trim();
+    if (!href || !name) {
+      continue;
+    }
+
+    entries.push({
+      id: idMatch[1],
+      href,
+      name,
+      modifiedLabel: decodeHtmlEntities(stripTags(modifiedMatch?.[1] || "")).trim(),
+      isFolder: href.includes("/drive/folders/"),
+    });
+  }
+
+  return entries;
+}
+
+async function selectLatestDriveFile(
+  entries: DriveFolderEntry[],
+  namePattern: RegExp,
+): Promise<DriveFolderEntry | null> {
+  const candidates = entries.filter((entry) => !entry.isFolder && namePattern.test(entry.name));
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const withModified = await Promise.all(
+    candidates.map(async (entry) => ({
+      entry,
+      modifiedMs: await fetchDriveLastModifiedMs(entry.id),
+    })),
+  );
+
+  withModified.sort((left, right) => {
+    if (left.modifiedMs !== right.modifiedMs) {
+      return right.modifiedMs - left.modifiedMs;
+    }
+
+    const leftDate = extractDateFromFileName(left.entry.name);
+    const rightDate = extractDateFromFileName(right.entry.name);
+    if (leftDate !== rightDate) {
+      return rightDate - leftDate;
+    }
+
+    return right.entry.name.localeCompare(left.entry.name);
+  });
+
+  return withModified[0].entry;
+}
+
+async function fetchDriveLastModifiedMs(fileId: string): Promise<number> {
+  const metadata = await fetchDriveRemoteMetadata(fileId);
+  return metadata.lastModifiedMs;
+}
+
+async function fetchDriveRemoteMetadata(fileId: string): Promise<RemoteDriveFileMetadata> {
+  try {
+    const response = await fetch(driveFileDownloadUrl(fileId), {
+      method: "HEAD",
+      redirect: "follow",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      return {
+        lastModifiedMs: 0,
+        sizeBytes: 0,
+      };
+    }
+
+    const header = response.headers.get("last-modified");
+    const parsed = header ? Date.parse(header) : Number.NaN;
+    const contentLength = Number(response.headers.get("content-length") || "0");
+    return {
+      lastModifiedMs: Number.isFinite(parsed) ? parsed : 0,
+      sizeBytes: Number.isFinite(contentLength) ? contentLength : 0,
+    };
+  } catch {
+    return {
+      lastModifiedMs: 0,
+      sizeBytes: 0,
+    };
+  }
+}
+
+async function downloadDriveEntryIfNeeded(
+  entry: DriveFolderEntry,
+  destinationPath: string,
+): Promise<void> {
+  const remoteMetadata = await fetchDriveRemoteMetadata(entry.id);
+  if (fs.existsSync(destinationPath)) {
+    const currentStat = fs.statSync(destinationPath);
+    const sameSize =
+      remoteMetadata.sizeBytes > 0 && currentStat.size === remoteMetadata.sizeBytes;
+    const sameModified =
+      remoteMetadata.lastModifiedMs > 0 &&
+      Math.abs(currentStat.mtimeMs - remoteMetadata.lastModifiedMs) < 1500;
+
+    if (sameSize && sameModified) {
+      return;
+    }
+  }
+
+  const response = await fetch(driveFileDownloadUrl(entry.id), {
+    redirect: "follow",
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Could not download "${entry.name}" from Google Drive (${response.status}).`);
+  }
+
+  const data = Buffer.from(await response.arrayBuffer());
+  const tempPath = `${destinationPath}.tmp-${Date.now()}`;
+  await fs.promises.writeFile(tempPath, data);
+  await fs.promises.rename(tempPath, destinationPath);
+
+  const modifiedMs =
+    remoteMetadata.lastModifiedMs ||
+    Date.parse(response.headers.get("last-modified") || "");
+  if (Number.isFinite(modifiedMs) && modifiedMs > 0) {
+    const modifiedDate = new Date(modifiedMs);
+    if (!Number.isNaN(modifiedDate.getTime())) {
+      fs.utimesSync(destinationPath, new Date(), modifiedDate);
+    }
+  }
+}
+
+function driveFileDownloadUrl(fileId: string): string {
+  return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
+}
+
+function extractDateFromFileName(fileName: string): number {
+  const parsed = new Date(fileName);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.getTime();
+  }
+
+  const match = fileName.match(
+    /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})(?:st|nd|rd|th)?[,]?\s+(\d{4})/i,
+  );
+  if (!match) {
+    return 0;
+  }
+
+  const parsedFromMonthName = Date.parse(`${match[1]} ${match[2]} ${match[3]}`);
+  return Number.isFinite(parsedFromMonthName) ? parsedFromMonthName : 0;
+}
+
+function stripTags(value: string): string {
+  return value.replace(/<[^>]*>/g, "");
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex: string) => {
+      const parsed = Number.parseInt(hex, 16);
+      return Number.isFinite(parsed) ? String.fromCodePoint(parsed) : "";
+    })
+    .replace(/&#(\d+);/g, (_, dec: string) => {
+      const parsed = Number.parseInt(dec, 10);
+      return Number.isFinite(parsed) ? String.fromCodePoint(parsed) : "";
+    })
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function filePathLabel(actualPath: string, fallbackPath: string): string {
+  if (actualPath.startsWith(runtimeDriveDataDir)) {
+    return `runtime-cache/${path.basename(actualPath)}`;
+  }
+  return fallbackPath;
+}
+
+function parseDailyTargetRows(workbook: XLSX.WorkBook): DailyTargetRow[] {
+  const sheet = findSheetByNamePart(workbook, "Daily TA Tortola");
   if (!sheet) {
-    throw new Error("Current Day sheet is missing from the BVI turnaround workbook.");
+    throw new Error("Daily TA Tortola sheet is missing from the BVI turnaround workbook.");
   }
 
   const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
@@ -511,137 +998,186 @@ function readCurrentDayWorkbook(): CurrentDayData {
     raw: true,
   });
 
-  const reportDate = extractReportDate(rows);
-  const startsFigures = extractStartFigures(rows);
-  const movements = extractCurrentDayMovements(rows);
+  const parsedRows: DailyTargetRow[] = [];
+  let currentDateIso = "";
+  let currentSection = "";
+  let mode: "turnaround" | "maintenance" | null = null;
+  let typeColumnOffset = 0;
 
-  return {
-    reportDate,
-    startsFigures,
-    movements,
-  };
-}
-
-function safeReadTurnaroundCsv(): TurnaroundEntry[] {
-  try {
-    return readTurnaroundCsv();
-  } catch (error) {
-    if (process.env.NODE_ENV !== "production") {
-      console.warn("[moorings.ms] Could not read turnaround CSV during this dev request.", error);
-    }
-    return [];
-  }
-}
-
-function safeReadCurrentDayWorkbook(): CurrentDayData {
-  try {
-    return readCurrentDayWorkbook();
-  } catch (error) {
-    if (process.env.NODE_ENV !== "production") {
-      console.warn("[moorings.ms] Could not read current-day workbook during this dev request.", error);
-    }
-    const now = new Date();
-    return {
-      reportDate: startOfDay(now),
-      startsFigures: [],
-      movements: [],
-    };
-  }
-}
-
-function extractReportDate(rows: unknown[][]): Date {
-  for (let index = 0; index < Math.min(rows.length, 25); index += 1) {
-    const cell = rows[index]?.[0];
-    if (cell instanceof Date) {
-      return startOfDay(cell);
-    }
-    if (typeof cell === "number") {
-      const parsed = XLSX.SSF.parse_date_code(cell);
-      if (parsed) {
-        return new Date(parsed.y, parsed.m - 1, parsed.d);
-      }
-    }
-  }
-
-  throw new Error("Could not determine report date from the Current Day sheet.");
-}
-
-function extractStartFigures(rows: unknown[][]): StartFigure[] {
-  const startIndex = rows.findIndex((row) => toText(row[2]).includes("Daily Starts Figures"));
-  if (startIndex === -1) {
-    return [];
-  }
-
-  const figures: StartFigure[] = [];
-
-  for (let idx = startIndex + 1; idx < Math.min(rows.length, startIndex + 12); idx += 1) {
-    const row = rows[idx];
-    const category = toText(row[2]);
-    if (!category) {
+  for (const row of rows) {
+    const possibleDate = findDateInDailyHeaderRow(row);
+    if (possibleDate) {
+      currentDateIso = possibleDate;
+      mode = null;
       continue;
     }
 
-    if (category.toLowerCase().startsWith("total starts")) {
+    const sectionCandidate = findSingleCellSectionLabel(row);
+    if (sectionCandidate) {
+      currentSection = sectionCandidate;
       continue;
     }
 
-    const figure: StartFigure = {
-      category,
-      noon: toNumber(row[3]),
-      saEs: toNumber(row[4]),
-      total: toNumber(row[5]),
-    };
+    const header = detectDailySheetHeader(row);
+    if (header) {
+      mode = header.mode;
+      typeColumnOffset = header.typeColumnOffset;
+      continue;
+    }
 
-    if (figure.total > 0 || figure.noon > 0 || figure.saEs > 0) {
-      figures.push(figure);
+    if (mode !== "turnaround" || !currentDateIso) {
+      continue;
+    }
+
+    const type = cleanCellText(row[typeColumnOffset]).toUpperCase();
+    const size = cleanCellText(row[typeColumnOffset + 1]);
+    const boatName = cleanCellText(row[typeColumnOffset + 2]);
+    if (!type || !boatName || type === "TYPE" || boatName.toUpperCase().includes("TOTAL")) {
+      continue;
+    }
+
+    parsedRows.push({
+      dateIso: currentDateIso,
+      section: currentSection || "Daily TA Tortola",
+      type,
+      size,
+      boatName,
+      lastCharterDateIso: normalizeSheetDate(row[typeColumnOffset + 4]),
+      daysUntilNextCharter: cleanCellText(row[typeColumnOffset + 5]),
+      nextCharterDateIso: normalizeSheetDate(row[typeColumnOffset + 6]),
+      nextCharterStartTime: cleanCellText(row[typeColumnOffset + 7]),
+      technicalCompletionRaw: cleanCellText(row[typeColumnOffset + 8]),
+      cleaningCompletionRaw: cleanCellText(row[typeColumnOffset + 9]),
+    });
+  }
+
+  return parsedRows;
+}
+
+function findDateInDailyHeaderRow(row: unknown[]): string {
+  for (const column of [0, 1, 2]) {
+    const normalized = normalizeSheetDate(row[column]);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function findSingleCellSectionLabel(row: unknown[]): string {
+  const nonEmpty = row
+    .map((cell, index) => ({ index, value: cleanCellText(cell) }))
+    .filter((cell) => cell.value);
+
+  if (nonEmpty.length !== 1) {
+    return "";
+  }
+
+  const value = nonEmpty[0]?.value || "";
+  const upper = value.toUpperCase();
+  if (upper === "TYPE") {
+    return "";
+  }
+  if (upper.includes("LAST CHARTER DATE") || upper.includes("MAINT START DATE")) {
+    return "";
+  }
+
+  return value;
+}
+
+function detectDailySheetHeader(
+  row: unknown[],
+): { mode: "turnaround" | "maintenance"; typeColumnOffset: number } | null {
+  for (let index = 0; index <= 2; index += 1) {
+    const possibleType = toText(row[index]).toUpperCase();
+    if (possibleType !== "TYPE") {
+      continue;
+    }
+
+    const charterHeaders = [toText(row[index + 4]).toUpperCase(), toText(row[index + 5]).toUpperCase()];
+    if (charterHeaders.some((value) => value.includes("LAST CHARTER DATE"))) {
+      return {
+        mode: "turnaround",
+        typeColumnOffset: index,
+      };
+    }
+
+    const maintenanceHeaders = [
+      toText(row[index + 3]).toUpperCase(),
+      toText(row[index + 4]).toUpperCase(),
+    ];
+    if (maintenanceHeaders.some((value) => value.includes("MAINT START DATE"))) {
+      return {
+        mode: "maintenance",
+        typeColumnOffset: index,
+      };
     }
   }
 
-  return figures;
+  return null;
 }
 
-function extractCurrentDayMovements(rows: unknown[][]): CurrentDayMovement[] {
+function parseMpStartsAndEndsRows(workbook: XLSX.WorkBook): {
+  movements: CurrentDayMovement[];
+  startsByDate: Map<string, CurrentDayMovement[]>;
+  charterPriorityByBoat: Map<string, VesselCharterPriority>;
+} {
+  const sheet = workbook.Sheets["MP Starts & Ends"];
+  if (!sheet) {
+    throw new Error("MP Starts & Ends sheet is missing from the BVI turnaround workbook.");
+  }
+
+  const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+    header: 1,
+    defval: null,
+    raw: true,
+  });
+
   const movements: CurrentDayMovement[] = [];
-  let currentSection = "Operations";
+  const startsByDate = new Map<string, CurrentDayMovement[]>();
+  const charterPriorityByBoat = new Map<string, VesselCharterPriority>();
 
-  for (let idx = 0; idx < rows.length; idx += 1) {
-    const row = rows[idx];
-    const onlyFirstCell =
-      row.filter((cell) => cell !== null && cell !== "").length === 1 && toText(row[0]).length > 0;
+  let currentDateIso = "";
+  let currentSection = "MP";
 
-    if (onlyFirstCell) {
-      const label = toText(row[0]).toUpperCase();
-      if (
-        label &&
-        !label.includes("TOTAL") &&
-        label !== "ENDS" &&
-        label !== "FUEL" &&
-        label !== "POWER"
-      ) {
-        currentSection = toText(row[0]);
-      }
-      if (label === "POWER") {
-        currentSection = "Power";
-      }
-    }
-
-    const isHeader = toText(row[0]) === "FUEL" && toText(row[8]) === "SIZE";
-    if (!isHeader) {
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const dateCandidate = normalizeSheetDate(row[0]);
+    if (dateCandidate) {
+      currentDateIso = dateCandidate;
+      currentSection = "MP";
       continue;
     }
 
-    for (let cursor = idx + 1; cursor < rows.length; cursor += 1) {
+    const nonEmptyCells = row.filter((cell) => cell !== null && cell !== "").length;
+    if (nonEmptyCells === 1 && cleanCellText(row[0])) {
+      currentSection = cleanCellText(row[0]);
+      continue;
+    }
+
+    const isHeader =
+      toText(row[0]).toUpperCase() === "FUEL" &&
+      toText(row[9]).toUpperCase() === "STARTS";
+    if (!isHeader || !currentDateIso) {
+      continue;
+    }
+
+    for (let cursor = index + 1; cursor < rows.length; cursor += 1) {
       const dataRow = rows[cursor];
       const firstCell = toText(dataRow[0]).toUpperCase();
-      if (firstCell === "FUEL" || firstCell === "ENDS") {
+      const possibleDateInBlock = normalizeSheetDate(dataRow[0]);
+      if (firstCell === "FUEL" || firstCell === "ENDS" || possibleDateInBlock) {
         break;
       }
 
       const endBoat = cleanCellText(dataRow[2]);
       const startBoat = cleanCellText(dataRow[9]);
+      const stat = cleanCellText(dataRow[7]) || "MP";
+      const startTime = formatTimeValue(dataRow[11]);
 
-      if (endBoat && !endBoat.includes("TOTAL") && !endBoat.includes("SIZE")) {
+      if (endBoat && !endBoat.toUpperCase().includes("TOTAL") && !endBoat.toUpperCase().includes("SIZE")) {
         movements.push({
+          dateIso: currentDateIso,
           section: currentSection,
           type: "end",
           boatName: endBoat,
@@ -650,42 +1186,630 @@ function extractCurrentDayMovements(rows: unknown[][]): CurrentDayMovement[] {
           pax: toNumber(dataRow[4]),
           charterer: cleanCellText(dataRow[5]),
           time: "",
+          stat,
         });
       }
 
-      if (startBoat && !startBoat.includes("TOTAL") && !startBoat.includes("SIZE")) {
-        movements.push({
+      if (
+        startBoat &&
+        !startBoat.toUpperCase().includes("TOTAL") &&
+        !startBoat.toUpperCase().includes("SIZE") &&
+        startBoat !== "BOAT NAME"
+      ) {
+        const charterer = cleanCellText(dataRow[12]);
+        const movement: CurrentDayMovement = {
+          dateIso: currentDateIso,
           section: currentSection,
           type: "start",
           boatName: startBoat,
           size: cleanCellText(dataRow[8]),
           contract: cleanCellText(dataRow[17]),
           pax: toNumber(dataRow[18]),
-          charterer: cleanCellText(dataRow[12]),
-          time: formatTimeValue(dataRow[11]),
-        });
-      }
+          charterer,
+          time: startTime,
+          stat,
+        };
+        movements.push(movement);
 
-      const looksLikeSectionBreak =
-        cleanCellText(dataRow[0]) === "" && cleanCellText(dataRow[9]) === "";
-      if (looksLikeSectionBreak && cleanCellText(dataRow[2]) === "") {
-        const nextRow = rows[cursor + 1];
-        const nextFirst = toText(nextRow?.[0]).toUpperCase();
+        const dateBucket = startsByDate.get(currentDateIso) ?? [];
+        dateBucket.push(movement);
+        startsByDate.set(currentDateIso, dateBucket);
+
+        const boatKey = normalizeBoatName(startBoat);
+        const priority = getCharterPriorityFromCharterer(charterer);
+        const existing = charterPriorityByBoat.get(boatKey);
         if (
-          nextFirst === "MOORINGS" ||
-          nextFirst === "SKIPPERED PRODUCT" ||
-          nextFirst === "CREWED" ||
-          nextFirst === "SUNSAIL" ||
-          nextFirst === "ACCOMMODATION" ||
-          nextFirst === "TRANSFERS"
+          !existing ||
+          charterPriorityRank(priority.level) > charterPriorityRank(existing.level)
         ) {
-          break;
+          charterPriorityByBoat.set(boatKey, priority);
         }
       }
     }
   }
 
-  return movements;
+  return {
+    movements,
+    startsByDate,
+    charterPriorityByBoat,
+  };
+}
+
+function extractCurrentSheetReportDate(workbook: XLSX.WorkBook): Date | null {
+  const sheet = workbook.Sheets["Current Day"];
+  if (!sheet) {
+    return null;
+  }
+
+  const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+    header: 1,
+    defval: null,
+    raw: true,
+  });
+
+  for (let index = 0; index < Math.min(rows.length, 32); index += 1) {
+    const iso = normalizeSheetDate(rows[index]?.[0]);
+    if (iso) {
+      return parseDate(iso);
+    }
+  }
+
+  return null;
+}
+
+function selectOperationalReportDate(input: {
+  currentDayDate: Date | null;
+  dailyRows: DailyTargetRow[];
+  mpStartsByDate: Map<string, CurrentDayMovement[]>;
+}): Date {
+  const dailyDates = [...new Set(input.dailyRows.map((row) => row.dateIso))].filter(Boolean);
+  dailyDates.sort((left, right) => left.localeCompare(right));
+  const latestDailyIso = dailyDates.at(-1) ?? "";
+  const todayIso = toIsoDate(startOfDay(new Date()));
+  const latestPastOrTodayIso = [...dailyDates]
+    .reverse()
+    .find((dateIso) => dateIso <= todayIso);
+
+  const mpDates = [...input.mpStartsByDate.keys()].sort((left, right) => left.localeCompare(right));
+  const latestMpIso = mpDates.at(-1) ?? "";
+
+  if (dailyDates.includes(todayIso)) {
+    return parseDate(todayIso);
+  }
+
+  if (latestPastOrTodayIso) {
+    return parseDate(latestPastOrTodayIso);
+  }
+
+  if (input.currentDayDate) {
+    const currentIso = toIsoDate(input.currentDayDate);
+    const hasDailyForCurrent = dailyDates.includes(currentIso);
+    if (hasDailyForCurrent) {
+      return input.currentDayDate;
+    }
+  }
+
+  if (latestDailyIso) {
+    return parseDate(latestDailyIso);
+  }
+
+  if (input.currentDayDate) {
+    return input.currentDayDate;
+  }
+
+  if (latestMpIso) {
+    return parseDate(latestMpIso);
+  }
+
+  return startOfDay(new Date());
+}
+
+function buildStartsFigures(movements: CurrentDayMovement[]): StartFigure[] {
+  const grouped = new Map<string, StartFigure>();
+
+  for (const movement of movements) {
+    if (movement.type !== "start") {
+      continue;
+    }
+
+    const statCode = cleanCellText(movement.stat).toUpperCase() || "MP";
+    const category =
+      statCode === "MP"
+        ? "Moorings Power"
+        : statCode === "TM"
+          ? "Moorings"
+          : statCode === "CY"
+            ? "Crewed Yacht"
+            : statCode === "SS"
+              ? "Sunsail"
+              : statCode;
+
+    const bucket =
+      grouped.get(category) ??
+      ({
+        category,
+        noon: 0,
+        saEs: 0,
+        total: 0,
+      } satisfies StartFigure);
+
+    const time = cleanCellText(movement.time).toUpperCase();
+    const isNoon = time.includes("12") || time.includes("NOON");
+    if (isNoon) {
+      bucket.noon += 1;
+    } else {
+      bucket.saEs += 1;
+    }
+    bucket.total += 1;
+    grouped.set(category, bucket);
+  }
+
+  return [...grouped.values()].sort((left, right) => right.total - left.total);
+}
+
+function readTechWorkerPools(): WorkerPools {
+  const workbookPath = resolveDriveDataFile(/^Tech Teams by Brand and Schedule.*\.xlsx$/i, true);
+  if (!workbookPath) {
+    return buildFallbackWorkerPools();
+  }
+
+  const workbook = XLSX.read(fs.readFileSync(workbookPath), {
+    type: "buffer",
+    raw: true,
+    dense: true,
+  });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  if (!sheet) {
+    return buildFallbackWorkerPools();
+  }
+
+  const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+    header: 1,
+    defval: null,
+    raw: true,
+  });
+
+  const bucketMaps: Record<
+    WorkforceRoleKey,
+    Map<string, { label: string; daysOff: Set<string> }>
+  > = {
+    technicians: new Map(),
+    riggers: new Map(),
+    shipwrights: new Map(),
+    acTechs: new Map(),
+  };
+  const powerWorkerColumn = 2; // Column C (Power)
+  const powerDaysOffColumn = 3; // Column D (days off)
+
+  for (let index = 1; index < rows.length; index += 1) {
+    const row = rows[index];
+    const workerCell = cleanCellText(row[powerWorkerColumn]);
+    if (!workerCell) {
+      continue;
+    }
+
+    const parsed = parseWorkerCell(workerCell);
+    if (!parsed) {
+      continue;
+    }
+
+    const daysOff = parseDaysOffCell(cleanCellText(row[powerDaysOffColumn]));
+    const key = normalizeBoatName(parsed.name);
+    const target = bucketMaps[parsed.role];
+    const existing = target.get(key);
+    if (existing) {
+      for (const day of daysOff) {
+        existing.daysOff.add(day);
+      }
+    } else {
+      target.set(key, {
+        label: parsed.name,
+        daysOff,
+      });
+    }
+  }
+
+  const fallback = buildFallbackWorkerPools();
+  const technicians = mapWorkersOrFallback(bucketMaps.technicians, fallback.technicians);
+  const riggers = mapWorkersOrFallback(bucketMaps.riggers, fallback.riggers);
+  const shipwrights = mapWorkersOrFallback(bucketMaps.shipwrights, fallback.shipwrights);
+  const acTechs = mapWorkersOrFallback(bucketMaps.acTechs, fallback.acTechs);
+
+  return { technicians, riggers, shipwrights, acTechs };
+}
+
+function mapWorkersOrFallback(
+  map: Map<string, { label: string; daysOff: Set<string> }>,
+  fallback: TechWorkerProfile[],
+): TechWorkerProfile[] {
+  if (map.size === 0) {
+    return fallback;
+  }
+
+  return [...map.values()].map((worker, index) => ({
+    id: index + 1,
+    label: worker.label,
+    daysOff: worker.daysOff,
+  }));
+}
+
+function buildFallbackWorkerPools(): WorkerPools {
+  const technicians: TechWorkerProfile[] = Array.from({ length: 6 }, (_, index) => ({
+    id: index + 1,
+    label: `Technician #${index + 1}`,
+    daysOff: new Set<string>(),
+  }));
+  const riggers: TechWorkerProfile[] = Array.from({ length: 5 }, (_, index) => ({
+    id: index + 1,
+    label: `Rigger #${index + 1}`,
+    daysOff: new Set<string>(),
+  }));
+  const shipwrights: TechWorkerProfile[] = Array.from({ length: 5 }, (_, index) => ({
+    id: index + 1,
+    label: `Shipwright #${index + 1}`,
+    daysOff: new Set<string>(),
+  }));
+  const acTechs: TechWorkerProfile[] = Array.from({ length: 2 }, (_, index) => ({
+    id: index + 1,
+    label: `AC Tech #${index + 1}`,
+    daysOff: new Set<string>(),
+  }));
+  return { technicians, riggers, shipwrights, acTechs };
+}
+
+function parseWorkerCell(raw: string): { name: string; role: WorkforceRoleKey } | null {
+  const cleaned = cleanCellText(raw);
+  if (!cleaned) {
+    return null;
+  }
+
+  if (/^CREWED$/i.test(cleaned)) {
+    return null;
+  }
+
+  const role: WorkforceRoleKey | null = /\bAC\b/i.test(cleaned) || /\bREFRIG\b/i.test(cleaned)
+    ? "acTechs"
+    : /\bRIG(?:GER)?S?\b/i.test(cleaned)
+      ? "riggers"
+      : /\bSHIPWRIGHTS?\b/i.test(cleaned) || /\bSW\b/i.test(cleaned)
+        ? "shipwrights"
+        : /\bTECH(?:NICIAN)?S?\b/i.test(cleaned) || /\bFG\b/i.test(cleaned)
+          ? "technicians"
+          : null;
+
+  if (!role) {
+    return null;
+  }
+
+  let name = cleaned;
+  if (cleaned.includes(",")) {
+    name = cleaned.split(",", 1)[0]?.trim() ?? "";
+  }
+
+  name = name
+    .replace(/\bTECH(?:NICIAN)?S?\b/gi, " ")
+    .replace(/\bAC\b/gi, " ")
+    .replace(/\bREFRIG\b/gi, " ")
+    .replace(/\bFG\b/gi, " ")
+    .replace(/\bRIG(?:GER)?S?\b/gi, " ")
+    .replace(/\bSHIPWRIGHTS?\b/gi, " ")
+    .replace(/\bSW\b/gi, " ")
+    .replace(/[|()/_-]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  if (!name) {
+    return null;
+  }
+
+  return { name, role };
+}
+
+function parseDaysOffCell(raw: string): Set<string> {
+  const matches = raw.match(/Mon|Tue|Wed|Thu|Fri|Sat|Sun/gi) ?? [];
+  return new Set(matches.map((day) => day.slice(0, 3)));
+}
+
+function getCharterPriorityFromCharterer(charterer: string): VesselCharterPriority {
+  const cleaned = cleanCellText(charterer);
+  if (!cleaned) {
+    return {
+      level: "none",
+      flag: null,
+      charterer: "",
+    };
+  }
+
+  if (/\(\s*OB\s*\)/i.test(cleaned)) {
+    return {
+      level: "ownerBerth",
+      flag: "OB",
+      charterer: cleaned,
+    };
+  }
+
+  if (/\(\s*O\s*\)/i.test(cleaned)) {
+    return {
+      level: "owner",
+      flag: "O",
+      charterer: cleaned,
+    };
+  }
+
+  return {
+    level: "none",
+    flag: null,
+    charterer: cleaned,
+  };
+}
+
+function charterPriorityRank(level: CharterPriorityLevel): number {
+  if (level === "owner") {
+    return 2;
+  }
+  if (level === "ownerBerth") {
+    return 1;
+  }
+  return 0;
+}
+
+function buildTurnaroundEntries(
+  rows: DailyTargetRow[],
+  workerPools: WorkerPools,
+  charterPriorityByBoat: Map<string, VesselCharterPriority>,
+): TurnaroundEntry[] {
+  const byDateBoat = new Map<string, TurnaroundEntry>();
+
+  for (const row of rows) {
+    const boatName = cleanCellText(row.boatName);
+    if (!boatName) {
+      continue;
+    }
+    if (!isPowerType(row.type)) {
+      continue;
+    }
+
+    const boatKey = normalizeBoatName(boatName);
+    const key = `${row.dateIso}-${boatKey}`;
+    const charterPriority = charterPriorityByBoat.get(boatKey) ?? {
+      level: "none",
+      flag: null,
+      charterer: "",
+    };
+    const urgency = parseDaysUntilCharter(row.daysUntilNextCharter);
+    const technicalStatus = parseTargetStatus(row.technicalCompletionRaw, urgency);
+    const cleaningStatus = parseTargetStatus(row.cleaningCompletionRaw, urgency);
+
+    const riggerStatus: RoleStatus = technicalStatus;
+    const shipwrightStatus: RoleStatus =
+      cleaningStatus === 0 && technicalStatus === 2 ? 1 : cleaningStatus;
+
+    const riggerAssignee = resolveWorkerId(workerPools.riggers, row.dateIso, boatName, "riggers");
+    const shipwrightAssignee = resolveWorkerId(
+      workerPools.shipwrights,
+      row.dateIso,
+      boatName,
+      "shipwright",
+    );
+
+    const completedAtIso = `${row.dateIso}T17:00:00.000Z`;
+    const roleStates: RoleState[] = [
+      {
+        key: "riggers",
+        label: "Rigger",
+        status: riggerStatus,
+        assigneeId: riggerAssignee,
+        updatedAtIso: riggerStatus === 2 ? completedAtIso : null,
+      },
+      {
+        key: "shipwright",
+        label: "Shipwright",
+        status: shipwrightStatus,
+        assigneeId: shipwrightAssignee,
+        updatedAtIso: shipwrightStatus === 2 ? completedAtIso : null,
+      },
+      {
+        key: "technical",
+        label: "Technical Turnaround",
+        status: technicalStatus,
+        assigneeId: riggerAssignee,
+        updatedAtIso: technicalStatus === 2 ? completedAtIso : null,
+      },
+      {
+        key: "cleaning",
+        label: "Cleaning",
+        status: cleaningStatus,
+        assigneeId: shipwrightAssignee,
+        updatedAtIso: cleaningStatus === 2 ? completedAtIso : null,
+      },
+    ];
+
+    const completedRoles = roleStates.filter((role) => role.status === 2).length;
+    const inProgressRoles = roleStates.filter((role) => role.status === 1).length;
+    const pendingRoles = roleStates.length - completedRoles - inProgressRoles;
+    const completionPct = ((completedRoles + inProgressRoles * 0.55) / Math.max(roleStates.length, 1)) * 100;
+
+    const entry: TurnaroundEntry = {
+      id: `${row.dateIso}-${boatKey}`,
+      dateIso: row.dateIso,
+      stat: row.type || "MP",
+      boatName,
+      boatLink: null,
+      roleStates,
+      completionPct,
+      completedRoles,
+      pendingRoles,
+      inProgressRoles,
+      charterPriority: charterPriority.level,
+      charterPriorityFlag: charterPriority.flag,
+      charterer: charterPriority.charterer,
+    };
+
+    const existing = byDateBoat.get(key);
+    if (!existing) {
+      byDateBoat.set(key, entry);
+      continue;
+    }
+
+    const replace =
+      completionPct < existing.completionPct ||
+      (completionPct === existing.completionPct && entry.stat === "MP" && existing.stat !== "MP");
+
+    if (replace) {
+      byDateBoat.set(key, entry);
+    }
+  }
+
+  return [...byDateBoat.values()].sort((left, right) => {
+    if (left.dateIso !== right.dateIso) {
+      return left.dateIso.localeCompare(right.dateIso);
+    }
+    return left.boatName.localeCompare(right.boatName);
+  });
+}
+
+function isPowerType(value: string): boolean {
+  const normalized = cleanCellText(value).toUpperCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized === "MP" || normalized.includes("POWER");
+}
+
+function parseDaysUntilCharter(raw: string): number {
+  const cleaned = cleanCellText(raw).toUpperCase();
+  if (!cleaned) {
+    return 2;
+  }
+  if (cleaned === "QTA") {
+    return 0;
+  }
+  const parsed = Number(cleaned);
+  if (Number.isFinite(parsed)) {
+    return parsed;
+  }
+  return 2;
+}
+
+function parseTargetStatus(raw: string, urgency: number): RoleStatus {
+  const cleaned = cleanCellText(raw).toUpperCase();
+  if (!cleaned) {
+    if (urgency <= 1) {
+      return 0;
+    }
+    if (urgency <= 2) {
+      return 1;
+    }
+    return 2;
+  }
+
+  if (
+    cleaned === "Y" ||
+    cleaned === "YES" ||
+    cleaned.includes("COMPLETE") ||
+    cleaned.includes("DONE")
+  ) {
+    return 2;
+  }
+
+  if (cleaned === "NOON" || cleaned === "SAB" || cleaned.includes("EVENING")) {
+    return 1;
+  }
+
+  return 1;
+}
+
+function resolveWorkerId(
+  workers: TechWorkerProfile[],
+  dateIso: string,
+  boatName: string,
+  roleSalt: string,
+): number {
+  if (workers.length === 0) {
+    return 0;
+  }
+
+  const dayLabel = parseDate(dateIso).toLocaleDateString("en-US", { weekday: "short" });
+  const available = workers.filter((worker) => !worker.daysOff.has(dayLabel));
+  const pool = available.length > 0 ? available : workers;
+
+  const hash = hashString(`${roleSalt}|${dateIso}|${normalizeBoatName(boatName)}`);
+  return pool[hash % pool.length]?.id ?? pool[0].id;
+}
+
+function hashString(value: string): number {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+function findSheetByNamePart(workbook: XLSX.WorkBook, namePart: string): XLSX.WorkSheet | null {
+  const target = namePart.trim().toLowerCase();
+  for (const name of workbook.SheetNames) {
+    if (name.trim().toLowerCase() === target) {
+      return workbook.Sheets[name];
+    }
+  }
+  for (const name of workbook.SheetNames) {
+    if (name.trim().toLowerCase().includes(target)) {
+      return workbook.Sheets[name];
+    }
+  }
+  return null;
+}
+
+function resolveDriveDataFile(pattern: RegExp): string;
+function resolveDriveDataFile(pattern: RegExp, optional: true): string | null;
+function resolveDriveDataFile(pattern: RegExp, optional = false): string | null {
+  const dataDirs = getDriveDataDirectories().filter((directoryPath) => fs.existsSync(directoryPath));
+  if (dataDirs.length === 0) {
+    if (optional) {
+      return null;
+    }
+    throw new Error(
+      `Missing required data directories: ${runtimeDriveDataDir} and ${bundledDriveDataDir}`,
+    );
+  }
+
+  for (const directoryPath of dataDirs) {
+    const matches = fs
+      .readdirSync(directoryPath)
+      .filter((entry) => pattern.test(entry))
+      .map((entry) => path.join(directoryPath, entry))
+      .sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs);
+
+    if (matches.length > 0) {
+      return matches[0];
+    }
+  }
+
+  if (optional) {
+    return null;
+  }
+  throw new Error(`Could not find a data file matching ${pattern} in ${dataDirs.join(", ")}`);
+}
+
+function getDriveDataDirectories(): string[] {
+  if (runtimeDriveDataDir === bundledDriveDataDir) {
+    return [bundledDriveDataDir];
+  }
+  return [runtimeDriveDataDir, bundledDriveDataDir];
+}
+
+function normalizeSheetDate(value: unknown): string {
+  if (value instanceof Date) {
+    return toIsoDate(value);
+  }
+  if (typeof value === "number") {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (parsed) {
+      return toIsoDate(new Date(parsed.y, parsed.m - 1, parsed.d));
+    }
+  }
+  const normalized = normalizeDateValue(value);
+  return normalized && normalized.includes("-") ? normalized : "";
 }
 
 function buildSchedule(input: {
@@ -757,6 +1881,8 @@ function buildFleetRows(todayRows: TurnaroundEntry[], tomorrowRows: TurnaroundEn
         completionPct: Math.round(entry.completionPct),
         pendingRoles: entry.pendingRoles,
         status,
+        charterPriority: entry.charterPriority,
+        charterPriorityFlag: entry.charterPriorityFlag,
         detailLink: entry.boatLink,
       };
     })
@@ -774,57 +1900,323 @@ function buildFleetRows(todayRows: TurnaroundEntry[], tomorrowRows: TurnaroundEn
     .slice(0, 26);
 }
 
-function buildInsights(
-  previousRows: TurnaroundEntry[],
-  todayRows: TurnaroundEntry[],
-  tomorrowRows: TurnaroundEntry[],
-  carryovers: TurnaroundEntry[],
-): InsightItem[] {
-  const rolePending = new Map<string, number>();
-  let completedChecks = 0;
-  let totalChecks = 0;
+function buildPlanningEngine(input: {
+  entries: TurnaroundEntry[];
+  workerPools: WorkerPools;
+  reportDate: Date;
+}): PlanningEngineData {
+  const demandByDate = new Map<string, number>();
+  for (const entry of input.entries) {
+    demandByDate.set(entry.dateIso, (demandByDate.get(entry.dateIso) ?? 0) + 1);
+  }
 
-  for (const entry of previousRows) {
-    for (const role of entry.roleStates) {
-      totalChecks += 1;
-      if (role.status === 2) {
-        completedChecks += 1;
-      }
-      if (role.status !== 2) {
-        rolePending.set(role.label, (rolePending.get(role.label) ?? 0) + 1);
-      }
+  const reportIso = toIsoDate(input.reportDate);
+  const tomorrowIso = toIsoDate(addDays(input.reportDate, 1));
+  const horizonDateSet = new Set<string>([reportIso, tomorrowIso]);
+
+  const sortedDates = [...demandByDate.keys()].sort((left, right) => left.localeCompare(right));
+  for (const dateIso of sortedDates) {
+    if (dateIso >= reportIso) {
+      horizonDateSet.add(dateIso);
     }
   }
 
-  const completionPct = totalChecks > 0 ? Math.round((completedChecks / totalChecks) * 100) : 0;
-  const topBottlenecks = [...rolePending.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 2)
-    .map(([role]) => role);
+  const horizonDates = [...horizonDateSet]
+    .sort((left, right) => left.localeCompare(right))
+    .slice(0, 14);
 
-  const tomorrowCritical = tomorrowRows.filter((entry) => entry.completionPct < 30).length;
+  const horizon = horizonDates.map((dateIso) =>
+    buildDailyPlanningSnapshot({
+      dateIso,
+      demandBoats: demandByDate.get(dateIso) ?? 0,
+      workerPools: input.workerPools,
+    }),
+  );
 
-  return [
+  const today =
+    horizon.find((snapshot) => snapshot.dateIso === reportIso) ??
+    buildDailyPlanningSnapshot({
+      dateIso: reportIso,
+      demandBoats: demandByDate.get(reportIso) ?? 0,
+      workerPools: input.workerPools,
+    });
+  const tomorrow =
+    horizon.find((snapshot) => snapshot.dateIso === tomorrowIso) ??
+    buildDailyPlanningSnapshot({
+      dateIso: tomorrowIso,
+      demandBoats: demandByDate.get(tomorrowIso) ?? 0,
+      workerPools: input.workerPools,
+    });
+
+  const recommendations = [
+    ...today.recommendations,
+    ...tomorrow.recommendations,
+    ...horizon.slice(2).flatMap((snapshot) => snapshot.recommendations.slice(0, 1)),
+  ].slice(0, 8);
+
+  const alerts = horizon
+    .filter((snapshot) => snapshot.status === "shortage")
+    .slice(0, 5)
+    .map((snapshot) => {
+      const gap = snapshot.roles
+        .filter((role) => role.shortageWorkers > 0)
+        .map(
+          (role) =>
+            `${role.shortageWorkers} ${pluralizeRoleForMessage(role.roleLabel, role.shortageWorkers)}`,
+        )
+        .join(", ");
+      return `⚠️ ${snapshot.dateLabel}: ${gap}.`;
+    });
+
+  return {
+    today,
+    tomorrow,
+    horizon,
+    recommendations,
+    alerts,
+  };
+}
+
+function buildDailyPlanningSnapshot(input: {
+  dateIso: string;
+  demandBoats: number;
+  workerPools: WorkerPools;
+}): DailyPlanningSnapshot {
+  const date = parseDate(input.dateIso);
+  const weekday = date.toLocaleDateString("en-US", { weekday: "short" });
+
+  const roles: RoleCapacitySnapshot[] = roleCapacityRules.map((rule) => {
+    const pool = input.workerPools[rule.key] ?? [];
+    const availableWorkers = pool.filter((worker) => !worker.daysOff.has(weekday));
+    const capacity = availableWorkers.length * rule.perWorkerCapacity;
+    const shortageBoats = Math.max(input.demandBoats - capacity, 0);
+    const shortageWorkers =
+      shortageBoats > 0 ? Math.ceil(shortageBoats / rule.perWorkerCapacity) : 0;
+
+    return {
+      roleKey: rule.key,
+      roleLabel: rule.label,
+      perWorkerCapacity: rule.perWorkerCapacity,
+      totalWorkers: pool.length,
+      availableWorkers: availableWorkers.length,
+      offWorkers: Math.max(pool.length - availableWorkers.length, 0),
+      availableWorkerNames: availableWorkers.map((worker) => worker.label),
+      capacity,
+      demand: input.demandBoats,
+      shortageBoats,
+      shortageWorkers,
+      surplusBoats: Math.max(capacity - input.demandBoats, 0),
+    };
+  });
+
+  const totalCapacityBoats =
+    roles.length > 0 ? Math.min(...roles.map((role) => role.capacity)) : 0;
+  const bottleneckRole =
+    roles.length > 0
+      ? [...roles].sort((left, right) => left.capacity - right.capacity)[0]?.roleLabel ?? "N/A"
+      : "N/A";
+
+  const hasShortage = roles.some((role) => role.shortageWorkers > 0);
+  const hasSurplus = roles.some((role) => role.surplusBoats >= role.perWorkerCapacity);
+  const status: DailyPlanningSnapshot["status"] = hasShortage
+    ? "shortage"
+    : hasSurplus
+      ? "surplus"
+      : "sufficient";
+
+  return {
+    dateIso: input.dateIso,
+    dateLabel: formatDate(date),
+    demandBoats: input.demandBoats,
+    bottleneckRole,
+    totalCapacityBoats,
+    status,
+    roles,
+    recommendations: buildDailyRecommendations({
+      date,
+      demandBoats: input.demandBoats,
+      roles,
+      status,
+    }),
+  };
+}
+
+function buildDailyRecommendations(input: {
+  date: Date;
+  demandBoats: number;
+  roles: RoleCapacitySnapshot[];
+  status: DailyPlanningSnapshot["status"];
+}): string[] {
+  const dateLabel = formatDate(input.date);
+  const shortages = input.roles.filter((role) => role.shortageWorkers > 0);
+  if (shortages.length > 0) {
+    return shortages.map(
+      (role) =>
+        `⚠️ Short ${role.shortageWorkers} ${pluralizeRoleForMessage(role.roleLabel, role.shortageWorkers)} for ${dateLabel}.`,
+    );
+  }
+
+  if (input.demandBoats <= 0) {
+    return [
+      `✅ Workforce sufficient for ${dateLabel}.`,
+      `💡 Spare capacity available for maintenance on ${dateLabel}.`,
+    ];
+  }
+
+  const recommendations = [`✅ Workforce sufficient for ${dateLabel}.`];
+  if (input.status === "surplus") {
+    recommendations.push(`💡 Spare capacity available for maintenance on ${dateLabel}.`);
+  }
+  return recommendations;
+}
+
+function pluralizeRoleForMessage(
+  roleLabel: RoleCapacitySnapshot["roleLabel"],
+  count: number,
+): string {
+  if (count === 1) {
+    return roleLabel.toLowerCase();
+  }
+  if (roleLabel === "AC Tech") {
+    return "AC techs";
+  }
+  return `${roleLabel.toLowerCase()}s`;
+}
+
+function buildOperationalNarrative(input: {
+  previousRows: TurnaroundEntry[];
+  todayRows: TurnaroundEntry[];
+  tomorrowRows: TurnaroundEntry[];
+  planningEngine: PlanningEngineData;
+  reportDate: Date;
+}): OperationsDashboardData["operationalNarrative"] {
+  const previousDate = addDays(input.reportDate, -1);
+  const nextDate = addDays(input.reportDate, 1);
+  const previousStatus = summarizeExecution(input.previousRows);
+  const todayStatus = summarizeExecution(input.todayRows);
+  const tomorrowStatus = summarizeExecution(input.tomorrowRows);
+
+  const todayShortageCount = input.planningEngine.today.roles.filter(
+    (role) => role.shortageWorkers > 0,
+  ).length;
+  const tomorrowShortageCount = input.planningEngine.tomorrow.roles.filter(
+    (role) => role.shortageWorkers > 0,
+  ).length;
+
+  return {
+    yesterday: {
+      dateIso: toIsoDate(previousDate),
+      dateLabel: formatDate(previousDate),
+      demandBoats: input.previousRows.length,
+      completedBoats: previousStatus.completed,
+      inProgressBoats: previousStatus.inProgress,
+      missedBoats: previousStatus.missed,
+      completionRate: previousStatus.completionRate,
+      workloadVsCapacity: `${input.previousRows.length} scheduled | ${previousStatus.completed} completed`,
+      narrative:
+        previousStatus.missed > 0
+          ? `${previousStatus.completed} completed and ${previousStatus.missed} missed on ${formatDate(previousDate)}.`
+          : `All ${previousStatus.completed} vessels from ${formatDate(previousDate)} were completed.`,
+    },
+    today: {
+      dateIso: toIsoDate(input.reportDate),
+      dateLabel: formatDate(input.reportDate),
+      demandBoats: input.todayRows.length,
+      completedBoats: todayStatus.completed,
+      inProgressBoats: todayStatus.inProgress,
+      missedBoats: todayStatus.missed,
+      completionRate: todayStatus.completionRate,
+      workloadVsCapacity: `${input.planningEngine.today.demandBoats} boats vs ${input.planningEngine.today.totalCapacityBoats} role-balanced capacity`,
+      narrative:
+        todayShortageCount > 0
+          ? `${todayStatus.inProgress} vessels are in progress. ${todayShortageCount} role shortages need action today.`
+          : `${todayStatus.inProgress} vessels are in progress and workforce capacity is currently sufficient.`,
+    },
+    tomorrow: {
+      dateIso: toIsoDate(nextDate),
+      dateLabel: formatDate(nextDate),
+      demandBoats: input.tomorrowRows.length,
+      completedBoats: tomorrowStatus.completed,
+      inProgressBoats: tomorrowStatus.inProgress,
+      missedBoats: tomorrowStatus.missed,
+      completionRate: tomorrowStatus.completionRate,
+      workloadVsCapacity: `${input.planningEngine.tomorrow.demandBoats} boats vs ${input.planningEngine.tomorrow.totalCapacityBoats} role-balanced capacity`,
+      narrative:
+        tomorrowShortageCount > 0
+          ? `Primary focus: ${input.planningEngine.tomorrow.demandBoats} boats due and ${tomorrowShortageCount} role shortages forecast.`
+          : `Primary focus: ${input.planningEngine.tomorrow.demandBoats} boats due and workforce is sufficient.`,
+    },
+  };
+}
+
+function summarizeExecution(rows: TurnaroundEntry[]): {
+  completed: number;
+  inProgress: number;
+  missed: number;
+  completionRate: number;
+} {
+  if (rows.length === 0) {
+    return {
+      completed: 0,
+      inProgress: 0,
+      missed: 0,
+      completionRate: 0,
+    };
+  }
+
+  const completed = rows.filter((row) => row.completionPct >= 95).length;
+  const inProgress = rows.filter((row) => row.completionPct >= 35 && row.completionPct < 95).length;
+  const missed = rows.filter((row) => row.completionPct < 35).length;
+
+  return {
+    completed,
+    inProgress,
+    missed,
+    completionRate: Math.round((completed / rows.length) * 100),
+  };
+}
+
+function buildPlanningInsights(
+  planningEngine: PlanningEngineData,
+  operationalNarrative: OperationsDashboardData["operationalNarrative"],
+): InsightItem[] {
+  const tomorrowTone: InsightItem["tone"] =
+    planningEngine.tomorrow.status === "shortage" ? "critical" : "positive";
+  const todayTone: InsightItem["tone"] =
+    planningEngine.today.status === "shortage" ? "warning" : "positive";
+  const yesterdayTone: InsightItem["tone"] =
+    operationalNarrative.yesterday.missedBoats > 0 ? "warning" : "positive";
+
+  const cards: InsightItem[] = [
     {
-      tone: completionPct >= 50 ? "positive" : "warning",
-      message: `Previous-day completion closed at ${completionPct}% across ${previousRows.length} boats.`,
+      tone: yesterdayTone,
+      message: operationalNarrative.yesterday.narrative,
     },
     {
-      tone: topBottlenecks.length > 0 ? "warning" : "neutral",
-      message:
-        topBottlenecks.length > 0
-          ? `Main bottlenecks are ${topBottlenecks.join(" and ")} from yesterday's carryovers.`
-          : "No role bottlenecks detected from the previous-day report.",
+      tone: todayTone,
+      message: operationalNarrative.today.narrative,
     },
     {
-      tone: carryovers.length > 12 ? "critical" : "neutral",
-      message: `${todayRows.length} boats are due today with ${carryovers.length} carryovers to absorb.`,
-    },
-    {
-      tone: tomorrowCritical > 3 ? "critical" : "positive",
-      message: `${tomorrowRows.length} boats are queued for tomorrow; ${tomorrowCritical} are currently high risk.`,
+      tone: tomorrowTone,
+      message: operationalNarrative.tomorrow.narrative,
     },
   ];
+
+  for (const message of [...planningEngine.recommendations, ...planningEngine.alerts]) {
+    if (cards.length >= 8) {
+      break;
+    }
+    cards.push({
+      tone: message.startsWith("⚠️")
+        ? "critical"
+        : message.startsWith("💡")
+          ? "neutral"
+          : "positive",
+      message,
+    });
+  }
+
+  return cards;
 }
 
 function buildReports(entries: TurnaroundEntry[], reportDate: Date) {
@@ -910,6 +2302,7 @@ function buildWorkerQualityReports(input: {
   roleName: "Rigger" | "Shipwright";
   reportDate: Date;
   plannedLoads: Map<number, number>;
+  workerLabels?: Map<number, string>;
 }): WorkerQualityReport[] {
   interface WorkerAccumulator {
     workerId: number;
@@ -1026,7 +2419,8 @@ function buildWorkerQualityReports(input: {
       return {
         id: `${input.roleName.toLowerCase()}-${worker.workerId}`,
         workerId: worker.workerId,
-        workerLabel: `${input.roleName} #${worker.workerId}`,
+        workerLabel:
+          input.workerLabels?.get(worker.workerId) ?? `${input.roleName} #${worker.workerId}`,
         role: input.roleName,
         assignments: worker.assignments,
         completed: worker.completed,
@@ -1101,6 +2495,8 @@ function buildAssignmentPlan(input: {
       timeWindow,
       priority: score >= 82 ? "Critical" : score >= 64 ? "High" : "Medium",
       completionPct: Math.round(candidate.entry.completionPct),
+      charterPriority: candidate.entry.charterPriority,
+      charterPriorityFlag: candidate.entry.charterPriorityFlag,
       rigger,
       shipwright,
       rationale: buildAssignmentRationale(candidate.entry, candidate.source, rigger, shipwright),
@@ -1271,6 +2667,8 @@ function buildVesselQualityReports(entries: TurnaroundEntry[], reportDate: Date)
       criticalTurnarounds,
       qualityScore,
       risk,
+      charterPriority: focusRow.charterPriority,
+      charterPriorityFlag: focusRow.charterPriorityFlag,
       assignedRigger:
         focusRigger && focusRigger.assigneeId > 0
           ? `Rigger #${focusRigger.assigneeId}`
@@ -1444,21 +2842,6 @@ function mapSource(source: string): "Carryover" | "Today" | "Tomorrow" {
   return "Carryover";
 }
 
-function parseBoatName(rawBoat: string): { name: string; link: string | null } {
-  const match = rawBoat.match(/\[(.*?)\]\((.*?)\)/);
-  if (!match) {
-    return {
-      name: cleanCellText(rawBoat),
-      link: null,
-    };
-  }
-
-  return {
-    name: cleanCellText(match[1]),
-    link: match[2] || null,
-  };
-}
-
 function guessSizeFromStat(stat: string): string {
   if (stat.includes("N")) {
     return "Nautical";
@@ -1481,17 +2864,6 @@ function groupEntries<T extends string>(
     groups.set(key, bucket);
   }
   return groups;
-}
-
-function toRoleStatus(value: unknown): RoleStatus {
-  const numeric = toNumber(value);
-  if (numeric === 2) {
-    return 2;
-  }
-  if (numeric === 1) {
-    return 1;
-  }
-  return 0;
 }
 
 function toNumber(value: unknown): number {
@@ -1649,22 +3021,4 @@ function normalizeDateValue(value: unknown): string {
   }
 
   return raw;
-}
-
-function normalizeTimestampValue(value: unknown): string | null {
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
-
-  const raw = String(value ?? "").trim();
-  if (!raw) {
-    return null;
-  }
-
-  const parsed = new Date(raw);
-  if (Number.isNaN(parsed.getTime())) {
-    return null;
-  }
-
-  return parsed.toISOString();
 }

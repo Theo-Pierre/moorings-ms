@@ -2,7 +2,11 @@
 
 import { useMemo, useState } from "react";
 
-import type { AssignmentPlanItem, OperationsDashboardData } from "@/lib/operations-data";
+import type {
+  AssignmentPlanItem,
+  CharterPriorityLevel,
+  OperationsDashboardData,
+} from "@/lib/operations-data";
 
 import styles from "./crm.module.css";
 
@@ -114,10 +118,13 @@ export function SchedulePage({ data }: SchedulePageProps) {
             </thead>
             <tbody>
               {pagedRows.map((item) => (
-                <tr key={item.id}>
+                <tr key={item.id} className={priorityRowClass(item.charterPriority)}>
                   <td>
                     <p className={styles.rowMain}>{item.boatName}</p>
-                    <p className={styles.rowMeta}>{item.source} | {item.stat}</p>
+                    <p className={styles.rowMeta}>
+                      {item.source} | {item.stat}
+                      {item.charterPriorityFlag ? ` | Charter ${item.charterPriorityFlag}` : ""}
+                    </p>
                   </td>
                   <td>{item.dueDateLabel}</td>
                   <td>
@@ -198,4 +205,14 @@ function WorkerCell({ worker }: { worker: AssignmentPlanItem["rigger"] }) {
       </p>
     </div>
   );
+}
+
+function priorityRowClass(priority: CharterPriorityLevel): string {
+  if (priority === "owner") {
+    return styles.priorityOwnerRow;
+  }
+  if (priority === "ownerBerth") {
+    return styles.priorityOwnerBerthRow;
+  }
+  return "";
 }

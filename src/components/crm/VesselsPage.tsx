@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
-import type { VesselQualityReport } from "@/lib/operations-data";
+import type { CharterPriorityLevel, VesselQualityReport } from "@/lib/operations-data";
 
 import { LineChart, PieChart } from "./charts";
 import styles from "./crm.module.css";
@@ -111,8 +111,8 @@ export function VesselsPage({ vessels, reportDateLabel }: VesselsPageProps) {
                 type="button"
                 className={
                   vessel.id === selectedId
-                    ? `${styles.selectorCard} ${styles.selectorCardActive}`
-                    : styles.selectorCard
+                    ? `${styles.selectorCard} ${styles.selectorCardActive} ${priorityCardClass(vessel.charterPriority)}`
+                    : `${styles.selectorCard} ${priorityCardClass(vessel.charterPriority)}`
                 }
                 onClick={() => setSelectedId(vessel.id)}
               >
@@ -122,6 +122,7 @@ export function VesselsPage({ vessels, reportDateLabel }: VesselsPageProps) {
                 </div>
                 <p className={styles.rowMeta}>
                   Quality {vessel.qualityScore}% | Avg {vessel.averageCompletionPct}% | {vessel.stat}
+                  {vessel.charterPriorityFlag ? ` | Charter ${vessel.charterPriorityFlag}` : ""}
                 </p>
                 <p className={styles.rowMeta}>
                   Rigger: {vessel.assignedRigger} | Shipwright: {vessel.assignedShipwright}
@@ -181,6 +182,9 @@ export function VesselsPage({ vessels, reportDateLabel }: VesselsPageProps) {
                 <div className={styles.pillCluster}>
                   <span className={styles.metricPill}>Quality {selected.qualityScore}%</span>
                   <span className={styles.metricPill}>Current {selected.currentCompletionPct}%</span>
+                  {selected.charterPriorityFlag ? (
+                    <span className={styles.metricPill}>Charter {selected.charterPriorityFlag}</span>
+                  ) : null}
                   <RiskBadge risk={selected.risk} />
                 </div>
               </div>
@@ -256,4 +260,14 @@ function RiskBadge({ risk }: { risk: VesselQualityReport["risk"] }) {
     return <span className={`${styles.statusBadge} ${styles.badgeHigh}`}>{risk}</span>;
   }
   return <span className={`${styles.statusBadge} ${styles.badgeMedium}`}>{risk}</span>;
+}
+
+function priorityCardClass(priority: CharterPriorityLevel): string {
+  if (priority === "owner") {
+    return styles.priorityOwnerCard;
+  }
+  if (priority === "ownerBerth") {
+    return styles.priorityOwnerBerthCard;
+  }
+  return "";
 }

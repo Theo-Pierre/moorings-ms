@@ -144,6 +144,7 @@
   min-width: 0;
   display: grid;
   grid-template-rows: auto 1fr;
+  overflow-x: hidden;
 }
 
 .mobileHeader {
@@ -255,6 +256,72 @@
   gap: 0.72rem;
 }
 
+.narrativeGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.72rem;
+}
+
+.narrativeCard {
+  border-radius: 1rem;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: var(--panel-shadow);
+  padding: 0.72rem;
+}
+
+.narrativeLabel {
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #355a79;
+  font-weight: 690;
+}
+
+.narrativeHeadline {
+  margin-top: 0.22rem;
+  font-size: 0.85rem;
+  font-weight: 710;
+}
+
+.narrativeMeta {
+  margin-top: 0.18rem;
+  font-size: 0.7rem;
+  color: #44627f;
+}
+
+.narrativeBody {
+  margin-top: 0.34rem;
+  font-size: 0.76rem;
+  color: #23425e;
+}
+
+.narrativePositive {
+  border-left: 4px solid var(--safe);
+}
+
+.narrativeWarning {
+  border-left: 4px solid var(--warning);
+}
+
+.narrativeCritical {
+  border-left: 4px solid var(--critical);
+}
+
+.engineLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.42fr) minmax(270px, 0.78fr);
+  gap: 0.72rem;
+}
+
+.engineAssignmentBlock {
+  margin-top: 0.72rem;
+}
+
+.intelligenceRail {
+  align-self: stretch;
+}
+
 .metricCard {
   padding: 0.76rem;
 }
@@ -335,6 +402,7 @@
 }
 
 .tableWrap {
+  max-width: 100%;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
@@ -682,6 +750,24 @@
   box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18);
 }
 
+.priorityOwnerRow {
+  background: linear-gradient(120deg, rgba(255, 244, 228, 0.82), rgba(255, 251, 241, 0.84));
+}
+
+.priorityOwnerBerthRow {
+  background: linear-gradient(120deg, rgba(255, 251, 214, 0.78), rgba(255, 254, 235, 0.84));
+}
+
+.priorityOwnerCard {
+  background: linear-gradient(145deg, rgba(255, 244, 228, 0.9), rgba(255, 255, 255, 0.9));
+  border-color: rgba(249, 115, 22, 0.24);
+}
+
+.priorityOwnerBerthCard {
+  background: linear-gradient(145deg, rgba(254, 249, 195, 0.86), rgba(255, 255, 255, 0.9));
+  border-color: rgba(217, 119, 6, 0.24);
+}
+
 .selectorTopRow {
   display: flex;
   justify-content: space-between;
@@ -846,6 +932,10 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .narrativeGrid {
+    grid-template-columns: 1fr;
+  }
+
   .threeCol {
     grid-template-columns: 1fr;
   }
@@ -858,6 +948,7 @@
 @media (max-width: 980px) {
   .crmFrame {
     grid-template-columns: 1fr;
+    font-size: 14px;
   }
 
   .sidebar {
@@ -871,7 +962,7 @@
   .mobileHeader {
     position: sticky;
     top: 0;
-    z-index: 130;
+    z-index: 300;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -908,6 +999,8 @@
   }
 
   .mobileMenuButton {
+    position: relative;
+    z-index: 330;
     border-radius: 999px;
     border: 1px solid rgba(3, 105, 161, 0.32);
     background: rgba(236, 254, 255, 0.9);
@@ -931,7 +1024,7 @@
     top: 3.85rem;
     left: 0;
     right: 0;
-    z-index: 125;
+    z-index: 420;
     display: block;
     max-height: calc(100dvh - 3.85rem);
     overflow-y: auto;
@@ -947,22 +1040,28 @@
     gap: 0.4rem;
   }
 
+  .mobileDropdown .sidebarLink {
+    min-height: 2.9rem;
+  }
+
   .mobileBackdrop {
     position: fixed;
     inset: 3.85rem 0 0;
-    z-index: 120;
+    z-index: 410;
     display: block;
     border: 0;
     background: rgba(7, 26, 46, 0.2);
   }
 
   .pageCanvas {
-    width: calc(100vw - 0.55rem);
+    width: calc(100vw - 0.68rem);
     margin: 0.56rem auto 1.08rem;
+    transform: none;
   }
 
   .splitPanel,
-  .twoCol {
+  .twoCol,
+  .engineLayout {
     grid-template-columns: 1fr;
   }
 
@@ -986,12 +1085,12 @@
   }
 
   .dataTable {
-    min-width: 760px;
+    min-width: 640px;
   }
 
   .dataTable th,
   .dataTable td {
-    padding: 0.52rem 0.44rem;
+    padding: 0.44rem 0.36rem;
   }
 
   .dataTable th {
@@ -1030,11 +1129,11 @@
   }
 
   .pageCanvas {
-    width: calc(100vw - 0.4rem);
+    width: calc(100vw - 0.35rem);
   }
 
   .dataTable {
-    min-width: 680px;
+    min-width: 560px;
   }
 
   .searchInput,

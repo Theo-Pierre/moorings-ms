@@ -16,9 +16,9 @@ const outfit = Outfit({
 });
 
 export const metadata: Metadata = {
-  title: "moorings.ms | Turnaround Operations",
+  title: "moorings.ms | Planning Intelligence",
   description:
-    "Moorings fleet turnaround scheduling and reporting dashboard powered by CSV/XLSX operational reports.",
+    "Moorings Power planning intelligence engine for demand, staffing capacity, and vessel-priority recommendations powered by MP Starts & Ends and Daily TA Tortola.",
 };
 
 export default function RootLayout({
