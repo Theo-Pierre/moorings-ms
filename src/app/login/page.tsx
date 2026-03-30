@@ -2,9 +2,9 @@ import Image from "next/image";
 import { redirect } from "next/navigation";
 
 import mooringsLogo from "@/assets/moorings-logo.png";
-import { loginAction } from "@/app/auth/actions";
 import { getQueryValue, getSession, normalizeNextPath } from "@/lib/auth";
 
+import { LoginPortal } from "./LoginPortal";
 import styles from "./login.module.css";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +16,6 @@ interface LoginPageProps {
 export default async function LoginPage(props: LoginPageProps) {
   const params = await props.searchParams;
   const nextPath = normalizeNextPath(getQueryValue(params.next), "/");
-  const error = getQueryValue(params.error) === "invalid";
   const signedOut = getQueryValue(params.signed_out) === "1";
 
   const existingSession = await getSession();
@@ -37,44 +36,13 @@ export default async function LoginPage(props: LoginPageProps) {
         </header>
 
         <div className={styles.copyBlock}>
-          <h1 className={styles.title}>Fleet Planning Sign In</h1>
-          <p className={styles.subtitle}>Use your Admin or Super Admin credentials to open the operations workspace.</p>
+          <h1 className={styles.title}>Fleet Planning Access Portal</h1>
+          <p className={styles.subtitle}>
+            Firebase authentication with role-based access. New users default to Viewer until promoted.
+          </p>
         </div>
 
-        {error ? <p className={`${styles.notice} ${styles.noticeError}`}>Invalid credentials. Please try again.</p> : null}
-        {signedOut ? <p className={`${styles.notice} ${styles.noticeInfo}`}>You have been signed out successfully.</p> : null}
-
-        <form action={loginAction} className={styles.loginForm}>
-          <input type="hidden" name="next" value={nextPath} />
-
-          <label className={styles.field}>
-            <span>Username</span>
-            <input
-              name="username"
-              type="text"
-              autoComplete="username"
-              placeholder="admin"
-              required
-              className={styles.input}
-            />
-          </label>
-
-          <label className={styles.field}>
-            <span>Password</span>
-            <input
-              name="password"
-              type="password"
-              autoComplete="current-password"
-              placeholder="••••••••"
-              required
-              className={styles.input}
-            />
-          </label>
-
-          <button type="submit" className={styles.submitButton}>
-            Sign In
-          </button>
-        </form>
+        <LoginPortal nextPath={nextPath} signedOut={signedOut} />
       </section>
     </main>
   );

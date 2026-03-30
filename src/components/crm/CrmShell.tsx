@@ -80,10 +80,8 @@ export function CrmShell({ appName, reportDateLabel, session, children }: CrmShe
 
         <div className={styles.sidebarAuthCard}>
           <p className={styles.authName}>{session.name}</p>
-          <p className={styles.authMeta}>@{session.username}</p>
-          <span className={styles.authRoleBadge}>
-            {session.role === "super-admin" ? "Super Admin" : "Admin"}
-          </span>
+          <p className={styles.authMeta}>{session.email}</p>
+          <span className={styles.authRoleBadge}>{roleLabel(session.role)}</span>
           <form action={logoutAction}>
             <button type="submit" className={styles.authLogoutButton}>
               Sign Out
@@ -128,10 +126,8 @@ export function CrmShell({ appName, reportDateLabel, session, children }: CrmShe
             {navContent}
             <div className={styles.mobileAuthBlock}>
               <p className={styles.authName}>{session.name}</p>
-              <p className={styles.authMeta}>@{session.username}</p>
-              <span className={styles.authRoleBadge}>
-                {session.role === "super-admin" ? "Super Admin" : "Admin"}
-              </span>
+              <p className={styles.authMeta}>{session.email}</p>
+              <span className={styles.authRoleBadge}>{roleLabel(session.role)}</span>
               <form action={logoutAction}>
                 <button type="submit" className={styles.authLogoutButton}>
                   Sign Out
@@ -211,4 +207,14 @@ function SailGlyph() {
       <path d="M3 20h18" />
     </svg>
   );
+}
+
+function roleLabel(role: AuthSession["role"]): string {
+  if (role === "super-admin") {
+    return "Super Admin";
+  }
+  if (role === "admin") {
+    return "Admin";
+  }
+  return "Viewer";
 }

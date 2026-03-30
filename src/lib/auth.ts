@@ -1,154 +1,47 @@
 import "server-only";
 
-import { createHmac, timingSafeEqual } from "node:crypto";
-
+import { FieldValue } from "firebase-admin/firestore";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { SESSION_COOKIE_NAME } from "./auth/constants";
+import { getFirebaseAdminAuth, getFirebaseAdminDb } from "./firebase/admin";
 
-export type UserRole = "admin" | "super-admin";
-
-interface AuthUser {
-  username: string;
-  password: string;
-  role: UserRole;
-  name: string;
-}
-
-interface SessionPayload {
-  username: string;
-  role: UserRole;
-  name: string;
-  exp: number;
-}
-
-export interface AuthSession {
-  username: string;
-  role: UserRole;
-  name: string;
-}
+export type UserRole = "viewer" | "admin" | "super-admin";
 
 const SESSION_DURATION_SECONDS = 60 * 60 * 12;
 const SESSION_DURATION_MS = SESSION_DURATION_SECONDS * 1000;
+const USER_ROLES_COLLECTION = process.env.MOORINGS_USER_ROLES_COLLECTION?.trim() || "user_roles";
 
-function getSessionSecret(): string {
-  return process.env.MOORINGS_SESSION_SECRET?.trim() || "moorings-ms-dev-secret-change-me";
+export interface AuthSession {
+  uid: string;
+  email: string;
+  name: string;
+  role: UserRole;
 }
 
-function configuredUsers(): AuthUser[] {
-  const configuredJson = parseUsersFromJson(process.env.MOORINGS_AUTH_USERS_JSON);
-  if (configuredJson.length > 0) {
-    return configuredJson;
-  }
-
-  const adminUser = process.env.MOORINGS_AUTH_ADMIN_USERNAME?.trim() || "admin";
-  const adminPassword = process.env.MOORINGS_AUTH_ADMIN_PASSWORD?.trim() || "admin123";
-  const adminName = process.env.MOORINGS_AUTH_ADMIN_NAME?.trim() || "Admin";
-
-  const superAdminUser = process.env.MOORINGS_AUTH_SUPER_ADMIN_USERNAME?.trim() || "superadmin";
-  const superAdminPassword = process.env.MOORINGS_AUTH_SUPER_ADMIN_PASSWORD?.trim() || "super123";
-  const superAdminName = process.env.MOORINGS_AUTH_SUPER_ADMIN_NAME?.trim() || "Super Admin";
-
-  return [
-    {
-      username: adminUser,
-      password: adminPassword,
-      role: "admin",
-      name: adminName,
-    },
-    {
-      username: superAdminUser,
-      password: superAdminPassword,
-      role: "super-admin",
-      name: superAdminName,
-    },
-  ];
+function isUserRole(value: unknown): value is UserRole {
+  return value === "viewer" || value === "admin" || value === "super-admin";
 }
 
-function parseUsersFromJson(raw: string | undefined): AuthUser[] {
-  if (!raw?.trim()) {
-    return [];
+function displayNameFromEmail(email: string): string {
+  const local = email.split("@")[0]?.trim();
+  if (!local) {
+    return email;
   }
-
-  try {
-    const parsed = JSON.parse(raw) as Array<{
-      username?: unknown;
-      password?: unknown;
-      role?: unknown;
-      name?: unknown;
-    }>;
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-
-    const users: AuthUser[] = [];
-    for (const entry of parsed) {
-      const username = typeof entry.username === "string" ? entry.username.trim() : "";
-      const password = typeof entry.password === "string" ? entry.password : "";
-      const role = entry.role === "super-admin" ? "super-admin" : entry.role === "admin" ? "admin" : null;
-      const name = typeof entry.name === "string" ? entry.name.trim() : "";
-
-      if (!username || !password || !role) {
-        continue;
-      }
-
-      users.push({
-        username,
-        password,
-        role,
-        name: name || username,
-      });
-    }
-
-    return users;
-  } catch {
-    return [];
-  }
+  return local
+    .split(/[.\-_]/g)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
-function safeEquals(left: string, right: string): boolean {
-  const leftBytes = Buffer.from(left, "utf8");
-  const rightBytes = Buffer.from(right, "utf8");
-  if (leftBytes.length !== rightBytes.length) {
-    return false;
+function resolveName(email: string, preferredName?: string | null): string {
+  const trimmed = preferredName?.trim();
+  if (trimmed) {
+    return trimmed;
   }
-  return timingSafeEqual(leftBytes, rightBytes);
-}
-
-function signPayload(payload: string): string {
-  return createHmac("sha256", getSessionSecret()).update(payload).digest("base64url");
-}
-
-function encodeSession(payload: SessionPayload): string {
-  const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-  const signature = signPayload(encodedPayload);
-  return `${encodedPayload}.${signature}`;
-}
-
-function decodeSession(token: string): SessionPayload | null {
-  const [encodedPayload, signature] = token.split(".");
-  if (!encodedPayload || !signature) {
-    return null;
-  }
-
-  const expectedSignature = signPayload(encodedPayload);
-  if (!safeEquals(expectedSignature, signature)) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as SessionPayload;
-    if (!parsed?.username || !parsed?.role || !parsed?.name || !parsed?.exp) {
-      return null;
-    }
-    if (parsed.exp <= Date.now()) {
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
+  return displayNameFromEmail(email);
 }
 
 export function normalizeNextPath(value: string | null | undefined, fallback = "/"): string {
@@ -167,10 +60,7 @@ export function normalizeNextPath(value: string | null | undefined, fallback = "
   return trimmed;
 }
 
-export function getQueryValue(
-  query: string | string[] | undefined,
-  fallback = "",
-): string {
+export function getQueryValue(query: string | string[] | undefined, fallback = ""): string {
   if (typeof query === "string") {
     return query;
   }
@@ -180,45 +70,66 @@ export function getQueryValue(
   return fallback;
 }
 
-export function authenticateUser(
-  usernameRaw: string,
-  passwordRaw: string,
-): AuthSession | null {
-  const username = usernameRaw.trim();
-  const password = passwordRaw;
-  if (!username || !password) {
-    return null;
-  }
+async function resolveRole(uid: string, email: string, tokenRole?: unknown): Promise<UserRole> {
+  const db = getFirebaseAdminDb();
+  const roleRef = db.collection(USER_ROLES_COLLECTION).doc(uid);
+  const roleDoc = await roleRef.get();
 
-  for (const user of configuredUsers()) {
-    if (safeEquals(user.username.toLowerCase(), username.toLowerCase()) && safeEquals(user.password, password)) {
-      return {
-        username: user.username,
-        role: user.role,
-        name: user.name,
-      };
+  if (roleDoc.exists) {
+    const role = roleDoc.data()?.role;
+    if (isUserRole(role)) {
+      return role;
     }
   }
 
-  return null;
+  const fallbackRole = isUserRole(tokenRole) ? tokenRole : "viewer";
+  await roleRef.set(
+    {
+      uid,
+      email: email.toLowerCase(),
+      role: fallbackRole,
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true },
+  );
+  return fallbackRole;
 }
 
-export async function createSession(session: AuthSession): Promise<void> {
-  const payload: SessionPayload = {
-    username: session.username,
-    role: session.role,
-    name: session.name,
-    exp: Date.now() + SESSION_DURATION_MS,
-  };
+export async function createSessionFromIdToken(idTokenRaw: string): Promise<AuthSession> {
+  const idToken = idTokenRaw.trim();
+  if (!idToken) {
+    throw new Error("Missing Firebase ID token.");
+  }
+
+  const auth = getFirebaseAdminAuth();
+  const decoded = await auth.verifyIdToken(idToken);
+
+  const email = decoded.email?.trim().toLowerCase();
+  if (!email) {
+    throw new Error("Authenticated user does not have an email address.");
+  }
+
+  const role = await resolveRole(decoded.uid, email, decoded.role);
+  const sessionCookie = await auth.createSessionCookie(idToken, {
+    expiresIn: SESSION_DURATION_MS,
+  });
 
   const cookieStore = await cookies();
-  cookieStore.set(SESSION_COOKIE_NAME, encodeSession(payload), {
+  cookieStore.set(SESSION_COOKIE_NAME, sessionCookie, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     maxAge: SESSION_DURATION_SECONDS,
     path: "/",
   });
+
+  return {
+    uid: decoded.uid,
+    email,
+    name: resolveName(email, decoded.name),
+    role,
+  };
 }
 
 export async function clearSession(): Promise<void> {
@@ -228,21 +139,30 @@ export async function clearSession(): Promise<void> {
 
 export async function getSession(): Promise<AuthSession | null> {
   const cookieStore = await cookies();
-  const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
-  if (!token) {
+  const sessionCookie = cookieStore.get(SESSION_COOKIE_NAME)?.value;
+
+  if (!sessionCookie) {
     return null;
   }
 
-  const payload = decodeSession(token);
-  if (!payload) {
+  try {
+    const auth = getFirebaseAdminAuth();
+    const decoded = await auth.verifySessionCookie(sessionCookie, true);
+    const email = decoded.email?.trim().toLowerCase();
+    if (!email) {
+      return null;
+    }
+
+    const role = await resolveRole(decoded.uid, email, decoded.role);
+    return {
+      uid: decoded.uid,
+      email,
+      name: resolveName(email, typeof decoded.name === "string" ? decoded.name : null),
+      role,
+    };
+  } catch {
     return null;
   }
-
-  return {
-    username: payload.username,
-    role: payload.role,
-    name: payload.name,
-  };
 }
 
 export async function requireSession(): Promise<AuthSession> {
