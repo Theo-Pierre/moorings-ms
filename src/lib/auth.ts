@@ -71,29 +71,38 @@ export function getQueryValue(query: string | string[] | undefined, fallback = "
 }
 
 async function resolveRole(uid: string, email: string, tokenRole?: unknown): Promise<UserRole> {
-  const db = getFirebaseAdminDb();
-  const roleRef = db.collection(USER_ROLES_COLLECTION).doc(uid);
-  const roleDoc = await roleRef.get();
-
-  if (roleDoc.exists) {
-    const role = roleDoc.data()?.role;
-    if (isUserRole(role)) {
-      return role;
-    }
-  }
-
   const fallbackRole = isUserRole(tokenRole) ? tokenRole : "viewer";
-  await roleRef.set(
-    {
-      uid,
-      email: email.toLowerCase(),
-      role: fallbackRole,
-      createdAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    },
-    { merge: true },
-  );
-  return fallbackRole;
+
+  try {
+    const db = getFirebaseAdminDb();
+    const roleRef = db.collection(USER_ROLES_COLLECTION).doc(uid);
+    const roleDoc = await roleRef.get();
+
+    if (roleDoc.exists) {
+      const role = roleDoc.data()?.role;
+      if (isUserRole(role)) {
+        return role;
+      }
+    }
+
+    await roleRef.set(
+      {
+        uid,
+        email: email.toLowerCase(),
+        role: fallbackRole,
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+    return fallbackRole;
+  } catch (error) {
+    console.warn(
+      "[moorings.ms] Firestore role lookup unavailable, using token/default role.",
+      error,
+    );
+    return fallbackRole;
+  }
 }
 
 export async function createSessionFromIdToken(idTokenRaw: string): Promise<AuthSession> {

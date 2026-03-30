@@ -7,7 +7,9 @@ Fleet operations planning and decision engine with Firebase Authentication and r
 - Authentication provider: **Firebase Auth** (email/password)
 - Roles: `viewer`, `admin`, `super-admin`
 - Default role for new users: **viewer**
-- Role storage: Firestore collection `user_roles`
+- Role storage:
+  - Primary: custom claims on Firebase Auth user
+  - Optional mirror: Firestore collection `user_roles`
 
 ## Role Promotion
 
@@ -26,7 +28,7 @@ Allowed roles:
 ## Firebase Setup
 
 1. In Firebase Console, enable **Authentication > Sign-in method > Email/Password**.
-2. Ensure Firestore is created for the project.
+2. (Optional) Enable Firestore if you want role records mirrored in `user_roles`.
 3. Set these environment variables for runtime/build:
 
 ```bash

@@ -26,25 +26,35 @@ try {
   const normalizedEmail = email.trim().toLowerCase();
   const user = await auth.getUserByEmail(normalizedEmail);
 
-  await db
-    .collection(ROLE_COLLECTION)
-    .doc(user.uid)
-    .set(
-      {
-        uid: user.uid,
-        email: normalizedEmail,
-        role,
-        updatedAt: FieldValue.serverTimestamp(),
-        promotedBy: process.env.USER || process.env.USERNAME || "operator",
-      },
-      { merge: true },
-    );
-
   await auth.setCustomUserClaims(user.uid, { role });
 
-  console.log(
-    `Updated role for ${normalizedEmail} -> ${role}. User UID: ${user.uid}. Collection: ${ROLE_COLLECTION}`,
-  );
+  let firestoreSaved = true;
+  try {
+    await db
+      .collection(ROLE_COLLECTION)
+      .doc(user.uid)
+      .set(
+        {
+          uid: user.uid,
+          email: normalizedEmail,
+          role,
+          updatedAt: FieldValue.serverTimestamp(),
+          promotedBy: process.env.USER || process.env.USERNAME || "operator",
+        },
+        { merge: true },
+      );
+  } catch (error) {
+    firestoreSaved = false;
+    console.warn(
+      "Firestore role write skipped (Firestore may be disabled). Custom claim was still updated.",
+      error instanceof Error ? error.message : error,
+    );
+  }
+
+  console.log(`Updated role for ${normalizedEmail} -> ${role}. User UID: ${user.uid}.`);
+  if (firestoreSaved) {
+    console.log(`Role also saved to Firestore collection: ${ROLE_COLLECTION}`);
+  }
   process.exit(0);
 } catch (error) {
   console.error("Unable to update user role:", error instanceof Error ? error.message : error);
