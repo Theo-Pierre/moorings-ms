@@ -17,9 +17,6 @@ export function proxy(request: NextRequest) {
   const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
 
   if (pathname === "/login") {
-    if (sessionToken) {
-      return NextResponse.redirect(new URL("/", request.url));
-    }
     return NextResponse.next();
   }
 

@@ -37,6 +37,11 @@ function getSessionSecret(): string {
 }
 
 function configuredUsers(): AuthUser[] {
+  const configuredJson = parseUsersFromJson(process.env.MOORINGS_AUTH_USERS_JSON);
+  if (configuredJson.length > 0) {
+    return configuredJson;
+  }
+
   const adminUser = process.env.MOORINGS_AUTH_ADMIN_USERNAME?.trim() || "admin";
   const adminPassword = process.env.MOORINGS_AUTH_ADMIN_PASSWORD?.trim() || "admin123";
   const adminName = process.env.MOORINGS_AUTH_ADMIN_NAME?.trim() || "Admin";
@@ -59,6 +64,47 @@ function configuredUsers(): AuthUser[] {
       name: superAdminName,
     },
   ];
+}
+
+function parseUsersFromJson(raw: string | undefined): AuthUser[] {
+  if (!raw?.trim()) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Array<{
+      username?: unknown;
+      password?: unknown;
+      role?: unknown;
+      name?: unknown;
+    }>;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    const users: AuthUser[] = [];
+    for (const entry of parsed) {
+      const username = typeof entry.username === "string" ? entry.username.trim() : "";
+      const password = typeof entry.password === "string" ? entry.password : "";
+      const role = entry.role === "super-admin" ? "super-admin" : entry.role === "admin" ? "admin" : null;
+      const name = typeof entry.name === "string" ? entry.name.trim() : "";
+
+      if (!username || !password || !role) {
+        continue;
+      }
+
+      users.push({
+        username,
+        password,
+        role,
+        name: name || username,
+      });
+    }
+
+    return users;
+  } catch {
+    return [];
+  }
 }
 
 function safeEquals(left: string, right: string): boolean {
