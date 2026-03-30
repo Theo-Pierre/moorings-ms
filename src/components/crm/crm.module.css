@@ -84,6 +84,56 @@
   padding-right: 0.2rem;
 }
 
+.sidebarAuthCard {
+  border-radius: 0.92rem;
+  border: 1px solid rgba(3, 105, 161, 0.22);
+  background: rgba(255, 255, 255, 0.82);
+  padding: 0.62rem;
+  display: grid;
+  gap: 0.34rem;
+}
+
+.authName {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #1d405e;
+}
+
+.authMeta {
+  font-size: 0.67rem;
+  color: #4a6782;
+}
+
+.authRoleBadge {
+  justify-self: flex-start;
+  border-radius: 999px;
+  border: 1px solid rgba(3, 105, 161, 0.28);
+  background: rgba(236, 253, 255, 0.96);
+  color: #155e75;
+  font-size: 0.64rem;
+  font-weight: 700;
+  padding: 0.2rem 0.52rem;
+}
+
+.authLogoutButton {
+  width: 100%;
+  border-radius: 0.64rem;
+  border: 1px solid rgba(2, 132, 199, 0.3);
+  background: rgba(240, 249, 255, 0.95);
+  color: #0f4a68;
+  font-size: 0.7rem;
+  font-weight: 680;
+  padding: 0.36rem 0.54rem;
+  cursor: pointer;
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+.authLogoutButton:hover,
+.authLogoutButton:focus-visible {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(2, 132, 199, 0.18);
+}
+
 .sidebarNavList {
   list-style: none;
   margin: 0;
@@ -153,6 +203,14 @@
 
 .mobileDropdown {
   display: none;
+}
+
+.mobileAuthBlock {
+  margin-top: 0.52rem;
+  border-top: 1px solid rgba(12, 36, 63, 0.12);
+  padding-top: 0.52rem;
+  display: grid;
+  gap: 0.34rem;
 }
 
 .mobileBackdrop {
@@ -254,6 +312,38 @@
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.72rem;
+}
+
+.taskQuickGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.72rem;
+}
+
+.taskQuickCard {
+  border-radius: 0.9rem;
+  border: 1px solid rgba(3, 105, 161, 0.2);
+  background:
+    linear-gradient(140deg, rgba(255, 255, 255, 0.95), rgba(236, 253, 255, 0.88)),
+    radial-gradient(circle at 8% 6%, rgba(56, 189, 248, 0.18), transparent 34%);
+  box-shadow: var(--panel-shadow);
+  padding: 0.68rem;
+}
+
+.taskQuickLabel {
+  font-size: 0.7rem;
+  color: #3d627f;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 680;
+}
+
+.taskQuickValue {
+  margin-top: 0.2rem;
+  font-family: var(--font-heading), "Segoe UI", sans-serif;
+  font-size: clamp(1.08rem, 2.8vw, 1.6rem);
+  color: #0e3b5e;
+  letter-spacing: -0.02em;
 }
 
 .narrativeGrid {
@@ -433,6 +523,30 @@
 .dataTable td {
   font-size: 0.78rem;
   color: #163a59;
+}
+
+.taskRowDone {
+  opacity: 0.74;
+}
+
+.taskTextDone {
+  text-decoration: line-through;
+}
+
+.taskToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  font-size: 0.68rem;
+  color: #365674;
+  font-weight: 680;
+}
+
+.taskCheckbox {
+  width: 0.95rem;
+  height: 0.95rem;
+  accent-color: #0f766e;
+  cursor: pointer;
 }
 
 .rowMain {
@@ -1065,6 +1179,10 @@
     grid-template-columns: 1fr;
   }
 
+  .taskQuickGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .heroCard {
     padding: 0.8rem;
   }
@@ -1117,6 +1235,10 @@
 
   .panelHeaderSplit {
     flex-direction: column;
+  }
+
+  .taskQuickGrid {
+    grid-template-columns: 1fr;
   }
 
   .tabGroup {

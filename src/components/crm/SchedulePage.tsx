@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type {
   AssignmentPlanItem,
@@ -11,6 +11,7 @@ import type {
 import styles from "./crm.module.css";
 
 type SourceFilter = "all" | "Today" | "Tomorrow" | "Carryover";
+type TaskFilter = "all" | "open" | "done";
 const PAGE_SIZE = 10;
 
 interface SchedulePageProps {
@@ -20,13 +21,37 @@ interface SchedulePageProps {
 export function SchedulePage({ data }: SchedulePageProps) {
   const [query, setQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+  const [taskFilter, setTaskFilter] = useState<TaskFilter>("all");
   const [page, setPage] = useState(1);
+  const taskStorageKey = useMemo(() => `moorings-ms:schedule-task-state:${data.reportDateIso}`, [
+    data.reportDateIso,
+  ]);
+  const [taskState, setTaskState] = useState<Record<string, true>>(() =>
+    loadTaskState(taskStorageKey, data.assignmentPlan),
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const doneIds = Object.keys(taskState);
+    window.localStorage.setItem(taskStorageKey, JSON.stringify(doneIds));
+  }, [taskState, taskStorageKey]);
 
   const rows = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
     return data.assignmentPlan.filter((item) => {
+      const isDone = Boolean(taskState[item.id]);
+
       if (sourceFilter !== "all" && item.source !== sourceFilter) {
+        return false;
+      }
+
+      if (taskFilter === "open" && isDone) {
+        return false;
+      }
+      if (taskFilter === "done" && !isDone) {
         return false;
       }
 
@@ -41,22 +66,59 @@ export function SchedulePage({ data }: SchedulePageProps) {
         item.stat.toLowerCase().includes(normalizedQuery)
       );
     });
-  }, [data.assignmentPlan, query, sourceFilter]);
+  }, [data.assignmentPlan, query, sourceFilter, taskFilter, taskState]);
 
   const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
   const startIndex = (currentPage - 1) * PAGE_SIZE;
   const pagedRows = rows.slice(startIndex, startIndex + PAGE_SIZE);
+  const totalTaskCount = data.assignmentPlan.length;
+  const completedTaskCount = Object.keys(taskState).length;
+  const openTaskCount = Math.max(0, totalTaskCount - completedTaskCount);
+  const completedVisibleCount = rows.reduce(
+    (count, item) => (taskState[item.id] ? count + 1 : count),
+    0,
+  );
+
+  function toggleTask(id: string) {
+    setTaskState((current) => {
+      if (current[id]) {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      }
+      return {
+        ...current,
+        [id]: true,
+      };
+    });
+  }
 
   return (
     <div className={styles.pageStack}>
       <section className={styles.heroCard}>
         <div>
-          <h1 className={styles.pageTitle}>Execution Schedule: Current + Next Day</h1>
+          <h1 className={styles.pageTitle}>Execution Task Hub: Current + Next Day</h1>
           <p className={styles.pageSubtitle}>
-            Assignment matrix generated from previous-day carryover, role status, and worker quality/load balancing.
+            Every scheduled vessel is a task. Tick tasks as work is completed to keep dispatch, quality, and daily
+            turnaround execution aligned.
           </p>
         </div>
+      </section>
+
+      <section className={styles.taskQuickGrid}>
+        <article className={styles.taskQuickCard}>
+          <p className={styles.taskQuickLabel}>Total Tasks</p>
+          <p className={styles.taskQuickValue}>{totalTaskCount}</p>
+        </article>
+        <article className={styles.taskQuickCard}>
+          <p className={styles.taskQuickLabel}>Open Tasks</p>
+          <p className={styles.taskQuickValue}>{openTaskCount}</p>
+        </article>
+        <article className={styles.taskQuickCard}>
+          <p className={styles.taskQuickLabel}>Completed Tasks</p>
+          <p className={styles.taskQuickValue}>{completedTaskCount}</p>
+        </article>
       </section>
 
       <section className={styles.panelCard}>
@@ -64,7 +126,8 @@ export function SchedulePage({ data }: SchedulePageProps) {
           <div>
             <h2 className={styles.sectionTitle}>Vessel Assignment Plan</h2>
             <p className={styles.sectionHint}>
-              Showing {pagedRows.length} of {rows.length} schedule rows. Page {currentPage} of {totalPages}.
+              Showing {pagedRows.length} of {rows.length} tasks ({completedVisibleCount} completed in this filter).
+              Page {currentPage} of {totalPages}.
             </p>
           </div>
 
@@ -99,6 +162,22 @@ export function SchedulePage({ data }: SchedulePageProps) {
                 <option value="Carryover">Carryover</option>
               </select>
             </label>
+
+            <label className={styles.selectWrap}>
+              <span className={styles.visuallyHidden}>Filter task status</span>
+              <select
+                className={styles.selectInput}
+                value={taskFilter}
+                onChange={(event) => {
+                  setTaskFilter(event.target.value as TaskFilter);
+                  setPage(1);
+                }}
+              >
+                <option value="all">All Tasks</option>
+                <option value="open">Open</option>
+                <option value="done">Done</option>
+              </select>
+            </label>
           </div>
         </div>
 
@@ -106,6 +185,7 @@ export function SchedulePage({ data }: SchedulePageProps) {
           <table className={styles.dataTable}>
             <thead>
               <tr>
+                <th>Task</th>
                 <th>Vessel</th>
                 <th>Due</th>
                 <th>Priority</th>
@@ -117,10 +197,26 @@ export function SchedulePage({ data }: SchedulePageProps) {
               </tr>
             </thead>
             <tbody>
-              {pagedRows.map((item) => (
-                <tr key={item.id} className={priorityRowClass(item.charterPriority)}>
+              {pagedRows.map((item) => {
+                const isDone = Boolean(taskState[item.id]);
+                const rowClass = `${priorityRowClass(item.charterPriority)} ${isDone ? styles.taskRowDone : ""}`.trim();
+
+                return (
+                <tr key={item.id} className={rowClass}>
                   <td>
-                    <p className={styles.rowMain}>{item.boatName}</p>
+                    <label className={styles.taskToggle}>
+                      <input
+                        type="checkbox"
+                        checked={isDone}
+                        onChange={() => toggleTask(item.id)}
+                        className={styles.taskCheckbox}
+                        aria-label={`Mark task for ${item.boatName} as complete`}
+                      />
+                      <span>{isDone ? "Done" : "Open"}</span>
+                    </label>
+                  </td>
+                  <td>
+                    <p className={isDone ? `${styles.rowMain} ${styles.taskTextDone}` : styles.rowMain}>{item.boatName}</p>
                     <p className={styles.rowMeta}>
                       {item.source} | {item.stat}
                       {item.charterPriorityFlag ? ` | Charter ${item.charterPriorityFlag}` : ""}
@@ -140,7 +236,8 @@ export function SchedulePage({ data }: SchedulePageProps) {
                   <td>{item.completionPct}%</td>
                   <td className={styles.longCell}>{item.rationale}</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -215,4 +312,35 @@ function priorityRowClass(priority: CharterPriorityLevel): string {
     return styles.priorityOwnerBerthRow;
   }
   return "";
+}
+
+function loadTaskState(
+  storageKey: string,
+  rows: AssignmentPlanItem[],
+): Record<string, true> {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  const validIds = new Set(rows.map((item) => item.id));
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as string[];
+    if (!Array.isArray(parsed)) {
+      return {};
+    }
+
+    const taskState: Record<string, true> = {};
+    for (const id of parsed) {
+      if (typeof id === "string" && validIds.has(id)) {
+        taskState[id] = true;
+      }
+    }
+    return taskState;
+  } catch {
+    return {};
+  }
 }

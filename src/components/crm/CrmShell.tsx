@@ -2,6 +2,8 @@
 
 import mooringsLogo from "@/assets/moorings-logo.png";
 import sunsailLogo from "@/assets/sunsail-logo.png";
+import { logoutAction } from "@/app/auth/actions";
+import type { AuthSession } from "@/lib/auth";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -12,6 +14,7 @@ import styles from "./crm.module.css";
 interface CrmShellProps {
   appName: string;
   reportDateLabel: string;
+  session: AuthSession;
   children: React.ReactNode;
 }
 
@@ -24,7 +27,7 @@ const navItems = [
   { href: "/reports", label: "Reports", icon: "wave" as const },
 ];
 
-export function CrmShell({ appName, reportDateLabel, children }: CrmShellProps) {
+export function CrmShell({ appName, reportDateLabel, session, children }: CrmShellProps) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -74,6 +77,19 @@ export function CrmShell({ appName, reportDateLabel, children }: CrmShellProps) 
         <nav aria-label="CRM navigation" className={styles.sidebarNav}>
           {navContent}
         </nav>
+
+        <div className={styles.sidebarAuthCard}>
+          <p className={styles.authName}>{session.name}</p>
+          <p className={styles.authMeta}>@{session.username}</p>
+          <span className={styles.authRoleBadge}>
+            {session.role === "super-admin" ? "Super Admin" : "Admin"}
+          </span>
+          <form action={logoutAction}>
+            <button type="submit" className={styles.authLogoutButton}>
+              Sign Out
+            </button>
+          </form>
+        </div>
       </aside>
 
       <div className={styles.mainColumn}>
@@ -110,6 +126,18 @@ export function CrmShell({ appName, reportDateLabel, children }: CrmShellProps) 
         {mobileOpen ? (
           <nav id="mobile-crm-nav" className={styles.mobileDropdown} aria-label="Mobile CRM navigation">
             {navContent}
+            <div className={styles.mobileAuthBlock}>
+              <p className={styles.authName}>{session.name}</p>
+              <p className={styles.authMeta}>@{session.username}</p>
+              <span className={styles.authRoleBadge}>
+                {session.role === "super-admin" ? "Super Admin" : "Admin"}
+              </span>
+              <form action={logoutAction}>
+                <button type="submit" className={styles.authLogoutButton}>
+                  Sign Out
+                </button>
+              </form>
+            </div>
           </nav>
         ) : null}
 
