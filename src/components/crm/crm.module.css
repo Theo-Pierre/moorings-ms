@@ -1064,8 +1064,8 @@
 @media (max-width: 980px) {
   .crmFrame {
     grid-template-columns: 1fr;
-    font-size: 13px;
-    overflow-x: hidden;
+    font-size: 12px;
+    overflow-x: clip;
   }
 
   .sidebar {
@@ -1173,7 +1173,7 @@
   .pageCanvas {
     width: 100%;
     margin: 0.56rem auto 1.08rem;
-    padding: 0 0.4rem;
+    padding: 0 0.24rem;
     transform: none;
   }
 
@@ -1207,13 +1207,15 @@
   }
 
   .tableWrap {
-    overflow-x: hidden;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
   }
 
   .dataTable {
-    width: 100%;
-    min-width: 0;
-    table-layout: fixed;
+    width: max-content;
+    min-width: 100%;
+    table-layout: auto;
   }
 
   .dataTable th,
@@ -1268,7 +1270,7 @@
 
   .pageCanvas {
     width: 100%;
-    padding: 0 0.24rem;
+    padding: 0 0.16rem;
   }
 
   .searchWrap,
