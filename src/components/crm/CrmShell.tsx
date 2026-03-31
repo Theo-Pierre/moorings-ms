@@ -91,6 +91,25 @@ export function CrmShell({ appName, reportDateLabel, session, children }: CrmShe
       </aside>
 
       <div className={styles.mainColumn}>
+        <header className={styles.desktopHeader}>
+          <div>
+            <p className={styles.desktopTitle}>
+              {timeGreeting()}, {session.name}
+            </p>
+            <p className={styles.desktopSubtitle}>
+              {roleLabel(session.role)} workspace | Ops date: {reportDateLabel}
+            </p>
+          </div>
+          <div className={styles.desktopActions}>
+            <Link href="/schedule" className={styles.desktopActionPrimary}>
+              + New Task
+            </Link>
+            <Link href="/reports" className={styles.desktopActionGhost}>
+              Upload
+            </Link>
+          </div>
+        </header>
+
         <header className={styles.mobileHeader}>
           <Link href="/" prefetch className={styles.mobileBrand}>
             <Image src={mooringsLogo} width={84} height={46} alt="Moorings" className={styles.mobileBrandLogo} priority />
@@ -217,4 +236,15 @@ function roleLabel(role: AuthSession["role"]): string {
     return "Admin";
   }
   return "Viewer";
+}
+
+function timeGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) {
+    return "Good morning";
+  }
+  if (hour < 18) {
+    return "Good afternoon";
+  }
+  return "Good evening";
 }
