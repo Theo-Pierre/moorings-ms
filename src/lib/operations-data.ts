@@ -349,9 +349,9 @@ const dashboardCacheIntervalMs = clampNumber(
   3600,
 ) * 1000;
 const maxDailySheetRows = clampNumber(
-  Number(process.env.MOORINGS_MAX_DAILY_SHEET_ROWS || "2500"),
-  200,
-  20000,
+  Number(process.env.MOORINGS_MAX_DAILY_SHEET_ROWS || "20000"),
+  12000,
+  60000,
 );
 const maxDailySheetCols = clampNumber(
   Number(process.env.MOORINGS_MAX_DAILY_SHEET_COLS || "40"),
