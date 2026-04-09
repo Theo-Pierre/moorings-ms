@@ -12,6 +12,35 @@ export type UserRole = "viewer" | "admin" | "super-admin";
 const SESSION_DURATION_SECONDS = 60 * 60 * 12;
 const SESSION_DURATION_MS = SESSION_DURATION_SECONDS * 1000;
 const USER_ROLES_COLLECTION = process.env.MOORINGS_USER_ROLES_COLLECTION?.trim() || "user_roles";
+const BACKEND_TIMEOUT_MS = clampMs(
+  Number(process.env.MOORINGS_BACKEND_TIMEOUT_MS || "2500"),
+  500,
+  10000,
+);
+const BOOTSTRAP_SUPER_ADMIN_EMAILS = [
+  "bludotads.tm@gmail.com",
+  "theo-pierre@bludotads.co.za",
+  "adriaan.labuschagne@travelopia.com",
+];
+
+function parseEmailList(value: string | undefined): Set<string> {
+  if (!value) {
+    return new Set<string>();
+  }
+
+  return new Set(
+    value
+      .split(",")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+const superAdminEmailAllowlist = parseEmailList(process.env.MOORINGS_SUPER_ADMIN_EMAILS);
+for (const email of BOOTSTRAP_SUPER_ADMIN_EMAILS) {
+  superAdminEmailAllowlist.add(email);
+}
+const adminEmailAllowlist = parseEmailList(process.env.MOORINGS_ADMIN_EMAILS);
 
 export interface AuthSession {
   uid: string;
@@ -71,29 +100,57 @@ export function getQueryValue(query: string | string[] | undefined, fallback = "
 }
 
 async function resolveRole(uid: string, email: string, tokenRole?: unknown): Promise<UserRole> {
-  const fallbackRole = isUserRole(tokenRole) ? tokenRole : "viewer";
+  const normalizedEmail = email.toLowerCase();
+  const fallbackRole = resolveRoleByAllowlist(
+    normalizedEmail,
+    isUserRole(tokenRole) ? tokenRole : "viewer",
+  );
 
   try {
     const db = getFirebaseAdminDb();
     const roleRef = db.collection(USER_ROLES_COLLECTION).doc(uid);
-    const roleDoc = await roleRef.get();
+    const roleDoc = await withTimeout(roleRef.get(), BACKEND_TIMEOUT_MS, "Role read timeout");
 
     if (roleDoc.exists) {
-      const role = roleDoc.data()?.role;
-      if (isUserRole(role)) {
-        return role;
+      const storedRole = roleDoc.data()?.role;
+      const resolvedRole = resolveRoleByAllowlist(
+        normalizedEmail,
+        isUserRole(storedRole) ? storedRole : fallbackRole,
+      );
+
+      if (isUserRole(storedRole) && storedRole === resolvedRole) {
+        return storedRole;
       }
+
+      await withTimeout(
+        roleRef.set(
+          {
+            uid,
+            email: normalizedEmail,
+            role: resolvedRole,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        ),
+        BACKEND_TIMEOUT_MS,
+        "Role write timeout",
+      );
+      return resolvedRole;
     }
 
-    await roleRef.set(
-      {
-        uid,
-        email: email.toLowerCase(),
-        role: fallbackRole,
-        createdAt: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
-      },
-      { merge: true },
+    await withTimeout(
+      roleRef.set(
+        {
+          uid,
+          email: normalizedEmail,
+          role: fallbackRole,
+          createdAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      ),
+      BACKEND_TIMEOUT_MS,
+      "Role bootstrap write timeout",
     );
     return fallbackRole;
   } catch (error) {
@@ -105,6 +162,16 @@ async function resolveRole(uid: string, email: string, tokenRole?: unknown): Pro
   }
 }
 
+function resolveRoleByAllowlist(email: string, fallbackRole: UserRole): UserRole {
+  if (superAdminEmailAllowlist.has(email)) {
+    return "super-admin";
+  }
+  if (adminEmailAllowlist.has(email)) {
+    return fallbackRole === "super-admin" ? "super-admin" : "admin";
+  }
+  return fallbackRole;
+}
+
 export async function createSessionFromIdToken(idTokenRaw: string): Promise<AuthSession> {
   const idToken = idTokenRaw.trim();
   if (!idToken) {
@@ -112,7 +179,11 @@ export async function createSessionFromIdToken(idTokenRaw: string): Promise<Auth
   }
 
   const auth = getFirebaseAdminAuth();
-  const decoded = await auth.verifyIdToken(idToken);
+  const decoded = await withTimeout(
+    auth.verifyIdToken(idToken),
+    BACKEND_TIMEOUT_MS,
+    "Verify ID token timeout",
+  );
 
   const email = decoded.email?.trim().toLowerCase();
   if (!email) {
@@ -120,9 +191,13 @@ export async function createSessionFromIdToken(idTokenRaw: string): Promise<Auth
   }
 
   const role = await resolveRole(decoded.uid, email, decoded.role);
-  const sessionCookie = await auth.createSessionCookie(idToken, {
-    expiresIn: SESSION_DURATION_MS,
-  });
+  const sessionCookie = await withTimeout(
+    auth.createSessionCookie(idToken, {
+      expiresIn: SESSION_DURATION_MS,
+    }),
+    BACKEND_TIMEOUT_MS,
+    "Create session cookie timeout",
+  );
 
   const cookieStore = await cookies();
   cookieStore.set(SESSION_COOKIE_NAME, sessionCookie, {
@@ -156,7 +231,11 @@ export async function getSession(): Promise<AuthSession | null> {
 
   try {
     const auth = getFirebaseAdminAuth();
-    const decoded = await auth.verifySessionCookie(sessionCookie, true);
+    const decoded = await withTimeout(
+      auth.verifySessionCookie(sessionCookie, true),
+      BACKEND_TIMEOUT_MS,
+      "Verify session cookie timeout",
+    );
     const email = decoded.email?.trim().toLowerCase();
     if (!email) {
       return null;
@@ -180,4 +259,26 @@ export async function requireSession(): Promise<AuthSession> {
     redirect("/login");
   }
   return session;
+}
+
+function clampMs(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(label));
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }) as Promise<T>;
 }

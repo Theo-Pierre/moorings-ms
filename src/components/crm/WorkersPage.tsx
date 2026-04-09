@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import type { WorkerQualityReport } from "@/lib/operations-data";
 
@@ -11,9 +11,10 @@ interface WorkersPageProps {
   title: string;
   subtitle: string;
   workers: WorkerQualityReport[];
+  topSection?: ReactNode;
 }
 
-export function WorkersPage({ title, subtitle, workers }: WorkersPageProps) {
+export function WorkersPage({ title, subtitle, workers, topSection }: WorkersPageProps) {
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(workers[0]?.id ?? null);
 
@@ -41,6 +42,8 @@ export function WorkersPage({ title, subtitle, workers }: WorkersPageProps) {
           <p className={styles.pageSubtitle}>{subtitle}</p>
         </div>
       </section>
+
+      {topSection}
 
       <section className={styles.panelCard}>
         <div className={styles.filterRow}>

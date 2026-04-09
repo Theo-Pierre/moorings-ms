@@ -14,7 +14,7 @@ body {
   padding: 0;
   min-height: 100%;
   max-width: 100%;
-  overflow-x: auto;
+  overflow-x: hidden;
 }
 
 body {

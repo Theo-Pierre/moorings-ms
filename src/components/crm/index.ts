@@ -4,3 +4,4 @@ export { SchedulePage } from "./SchedulePage";
 export { VesselsPage } from "./VesselsPage";
 export { WorkersPage } from "./WorkersPage";
 export { ReportsPage } from "./ReportsPage";
+export { TeamControlPanel } from "./TechnicianControlPanel";

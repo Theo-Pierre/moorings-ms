@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 import type {
   AssignmentPlanItem,
@@ -8,43 +9,136 @@ import type {
   OperationsDashboardData,
 } from "@/lib/operations-data";
 
+import {
+  applyVesselOverridesToAssignmentRows,
+  useManualAssignmentRows,
+  useVesselOverrides,
+} from "./manual-vessels";
+import { useSharedTaskState } from "./shared-task-state";
 import styles from "./crm.module.css";
 
-type SourceFilter = "all" | "Today" | "Tomorrow" | "Carryover";
 type TaskFilter = "all" | "open" | "done";
-const PAGE_SIZE = 10;
+type DayView = "all" | "yesterday" | "today" | "tomorrow" | "nextWeek";
+type SearchScope = "all" | "vessel" | "technician" | "rigger" | "shipwright";
+const DAILY_CUTOFF_HOUR = 8;
+const PAGE_SIZE = 5;
 
 interface SchedulePageProps {
   data: OperationsDashboardData;
 }
 
 export function SchedulePage({ data }: SchedulePageProps) {
+  const searchParams = useSearchParams();
+  const manualAssignmentRows = useManualAssignmentRows();
+  const vesselOverrides = useVesselOverrides();
+  const assignmentRows = useMemo(
+    () => applyVesselOverridesToAssignmentRows([...manualAssignmentRows, ...data.assignmentPlan], vesselOverrides),
+    [manualAssignmentRows, data.assignmentPlan, vesselOverrides],
+  );
+  const requestedView = parseDayView(searchParams.get("view"));
   const [query, setQuery] = useState("");
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+  const [searchScope, setSearchScope] = useState<SearchScope>("all");
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+  const [dayView, setDayView] = useState<DayView>(requestedView);
   const [taskFilter, setTaskFilter] = useState<TaskFilter>("all");
-  const [page, setPage] = useState(1);
-  const taskStorageKey = useMemo(() => `moorings-ms:schedule-task-state:${data.reportDateIso}`, [
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const { taskState, setTaskDone, pendingTaskIds } = useSharedTaskState(
+    data.reportDateIso,
+    assignmentRows,
+  );
+  const nextWeekEndIso = useMemo(() => toIsoDate(addDays(parseIsoDate(data.reportDateIso), 7)), [
     data.reportDateIso,
   ]);
-  const [taskState, setTaskState] = useState<Record<string, true>>(() =>
-    loadTaskState(taskStorageKey, data.assignmentPlan),
+  const nextOperationalIso = useMemo(
+    () => toIsoDate(addDays(parseIsoDate(data.reportDateIso), 1)),
+    [data.reportDateIso],
   );
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
+    const interval = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 30000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    setDayView(requestedView);
+  }, [requestedView]);
+
+  const scheduleLocked = useMemo(
+    () => isScheduleLocked(data.reportDateIso, new Date(nowMs)),
+    [data.reportDateIso, nowMs],
+  );
+
+  const completedYesterdayBoatKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const row of assignmentRows) {
+      if (row.source !== "Yesterday") {
+        continue;
+      }
+      if (taskState[row.id]) {
+        keys.add(normalizeBoatKey(row.boatName));
+      }
     }
-    const doneIds = Object.keys(taskState);
-    window.localStorage.setItem(taskStorageKey, JSON.stringify(doneIds));
-  }, [taskState, taskStorageKey]);
+    return keys;
+  }, [assignmentRows, taskState]);
+
+  const executionRows = useMemo(
+    () =>
+      assignmentRows.filter((row) => {
+        if (row.source !== "Today" && row.source !== "Carryover") {
+          return true;
+        }
+        return !completedYesterdayBoatKeys.has(normalizeBoatKey(row.boatName));
+      }),
+    [assignmentRows, completedYesterdayBoatKeys],
+  );
+
+  const effectiveExecutionRows = useMemo(() => {
+    if (!scheduleLocked) {
+      return executionRows;
+    }
+
+    const todayRows = executionRows.filter(
+      (row) => row.source === "Today" || row.source === "Carryover",
+    );
+    const futureRows = executionRows.filter(
+      (row) => row.source !== "Today" && row.source !== "Carryover",
+    );
+
+    const lockedCompletedTodayRows = todayRows.filter((row) => Boolean(taskState[row.id]));
+    const rolledToTomorrowRows = todayRows
+      .filter((row) => !taskState[row.id])
+      .map((row) => ({
+        ...row,
+        source: "Carryover" as const,
+        dueDate: nextOperationalIso,
+        dueDateLabel: formatDateLabel(nextOperationalIso),
+        rationale: `${row.rationale} | Auto-carried after ${DAILY_CUTOFF_HOUR}:00 cutoff.`,
+      }));
+
+    return [...lockedCompletedTodayRows, ...futureRows, ...rolledToTomorrowRows];
+  }, [executionRows, nextOperationalIso, scheduleLocked, taskState]);
 
   const rows = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
-    return data.assignmentPlan.filter((item) => {
+    return effectiveExecutionRows.filter((item) => {
       const isDone = Boolean(taskState[item.id]);
 
-      if (sourceFilter !== "all" && item.source !== sourceFilter) {
+      if (dayView === "yesterday" && !(item.dueDate < data.reportDateIso || item.source === "Yesterday")) {
+        return false;
+      }
+      if (dayView === "today" && item.dueDate !== data.reportDateIso) {
+        return false;
+      }
+      if (dayView === "tomorrow" && item.dueDate !== nextOperationalIso) {
+        return false;
+      }
+      if (dayView === "nextWeek" && !(item.dueDate > data.reportDateIso && item.dueDate <= nextWeekEndIso)) {
+        return false;
+      }
+      if (dayView === "all" && item.dueDate < data.reportDateIso) {
         return false;
       }
 
@@ -59,39 +153,91 @@ export function SchedulePage({ data }: SchedulePageProps) {
         return true;
       }
 
-      return (
+      const inVessel =
         item.boatName.toLowerCase().includes(normalizedQuery) ||
-        item.rigger.workerLabel.toLowerCase().includes(normalizedQuery) ||
-        item.shipwright.workerLabel.toLowerCase().includes(normalizedQuery) ||
-        item.stat.toLowerCase().includes(normalizedQuery)
-      );
-    });
-  }, [data.assignmentPlan, query, sourceFilter, taskFilter, taskState]);
+        item.stat.toLowerCase().includes(normalizedQuery);
+      const inTechnician = item.technician.workerLabel.toLowerCase().includes(normalizedQuery);
+      const inRigger = item.rigger.workerLabel.toLowerCase().includes(normalizedQuery);
+      const inShipwright = item.shipwright.workerLabel.toLowerCase().includes(normalizedQuery);
 
-  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
-  const currentPage = Math.min(page, totalPages);
-  const startIndex = (currentPage - 1) * PAGE_SIZE;
-  const pagedRows = rows.slice(startIndex, startIndex + PAGE_SIZE);
-  const totalTaskCount = data.assignmentPlan.length;
-  const completedTaskCount = Object.keys(taskState).length;
-  const openTaskCount = Math.max(0, totalTaskCount - completedTaskCount);
-  const completedVisibleCount = rows.reduce(
-    (count, item) => (taskState[item.id] ? count + 1 : count),
+      if (searchScope === "vessel") {
+        return inVessel;
+      }
+      if (searchScope === "technician") {
+        return inTechnician;
+      }
+      if (searchScope === "rigger") {
+        return inRigger;
+      }
+      if (searchScope === "shipwright") {
+        return inShipwright;
+      }
+
+      return inVessel || inTechnician || inRigger || inShipwright;
+    });
+  }, [data.reportDateIso, dayView, effectiveExecutionRows, nextOperationalIso, nextWeekEndIso, query, searchScope, taskFilter, taskState]);
+
+  const searchSuggestions = useMemo(() => {
+    const values =
+      searchScope === "vessel"
+        ? effectiveExecutionRows.flatMap((item) => [item.boatName, item.stat])
+        : searchScope === "technician"
+          ? effectiveExecutionRows.map((item) => item.technician.workerLabel)
+          : searchScope === "rigger"
+            ? effectiveExecutionRows.map((item) => item.rigger.workerLabel)
+            : searchScope === "shipwright"
+              ? effectiveExecutionRows.map((item) => item.shipwright.workerLabel)
+              : effectiveExecutionRows.flatMap((item) => [
+                  item.boatName,
+                  item.stat,
+                  item.technician.workerLabel,
+                  item.rigger.workerLabel,
+                  item.shipwright.workerLabel,
+                ]);
+    return [...new Set(values.filter(Boolean))].sort((left, right) => left.localeCompare(right)).slice(0, 200);
+  }, [effectiveExecutionRows, searchScope]);
+
+  const orderedRows = useMemo(
+    () => [...rows].sort(compareTimelineRows),
+    [rows],
+  );
+  const todayRows = useMemo(
+    () => orderedRows.filter((item) => item.dueDate === data.reportDateIso),
+    [data.reportDateIso, orderedRows],
+  );
+  const tomorrowRows = useMemo(
+    () => orderedRows.filter((item) => item.dueDate === nextOperationalIso),
+    [nextOperationalIso, orderedRows],
+  );
+  const yesterdayRows = useMemo(
+    () => orderedRows.filter((item) => item.dueDate < data.reportDateIso || item.source === "Yesterday"),
+    [data.reportDateIso, orderedRows],
+  );
+  const upcomingDateGroups = useMemo(() => {
+    const grouped = new Map<string, AssignmentPlanItem[]>();
+    for (const row of orderedRows) {
+      if (row.dueDate <= nextOperationalIso) {
+        continue;
+      }
+      const bucket = grouped.get(row.dueDate) ?? [];
+      bucket.push(row);
+      grouped.set(row.dueDate, bucket);
+    }
+    return [...grouped.entries()]
+      .sort((left, right) => left[0].localeCompare(right[0]))
+      .map(([dateIso, items]) => ({ dateIso, label: formatDateLabel(dateIso), items }));
+  }, [nextOperationalIso, orderedRows]);
+
+  const totalTaskCount = rows.length;
+  const completedTaskCount = rows.reduce(
+    (count, row) => (taskState[row.id] ? count + 1 : count),
     0,
   );
+  const openTaskCount = Math.max(0, totalTaskCount - completedTaskCount);
 
   function toggleTask(id: string) {
-    setTaskState((current) => {
-      if (current[id]) {
-        const next = { ...current };
-        delete next[id];
-        return next;
-      }
-      return {
-        ...current,
-        [id]: true,
-      };
-    });
+    const nextDone = !Boolean(taskState[id]);
+    void setTaskDone(id, nextDone);
   }
 
   return (
@@ -126,9 +272,51 @@ export function SchedulePage({ data }: SchedulePageProps) {
           <div>
             <h2 className={styles.sectionTitle}>Vessel Assignment Plan</h2>
             <p className={styles.sectionHint}>
-              Showing {pagedRows.length} of {rows.length} tasks ({completedVisibleCount} completed in this filter).
-              Page {currentPage} of {totalPages}.
+              Date-block timeline view: vessels are grouped by operational day in continuous order.
             </p>
+            <p className={styles.sectionHint}>
+              Departure-first planning with {DAILY_CUTOFF_HOUR}:00 local cutoff.
+              {scheduleLocked
+                ? " Cutoff reached: today is locked and open vessels are auto-carried to tomorrow."
+                : " Today remains live until cutoff."}
+            </p>
+            <div className={styles.tabGroup}>
+              <button
+                type="button"
+                className={dayView === "yesterday" ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
+                onClick={() => setDayView("yesterday")}
+              >
+                Yesterday
+              </button>
+              <button
+                type="button"
+                className={dayView === "today" ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
+                onClick={() => setDayView("today")}
+              >
+                Today
+              </button>
+              <button
+                type="button"
+                className={dayView === "tomorrow" ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
+                onClick={() => setDayView("tomorrow")}
+              >
+                Tomorrow
+              </button>
+              <button
+                type="button"
+                className={dayView === "nextWeek" ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
+                onClick={() => setDayView("nextWeek")}
+              >
+                Next Week
+              </button>
+              <button
+                type="button"
+                className={dayView === "all" ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
+                onClick={() => setDayView("all")}
+              >
+                All
+              </button>
+            </div>
           </div>
 
           <div className={styles.filterRow}>
@@ -137,31 +325,50 @@ export function SchedulePage({ data }: SchedulePageProps) {
               <input
                 type="search"
                 className={styles.searchInput}
-                placeholder="Search vessel, rigger, shipwright, stat"
+                placeholder={`Search ${searchScope === "all" ? "vessel, technician, rigger, shipwright" : searchScope}`}
                 value={query}
+                list="schedule-search-suggestions"
                 onChange={(event) => {
                   setQuery(event.target.value);
-                  setPage(1);
                 }}
               />
+              <datalist id="schedule-search-suggestions">
+                {searchSuggestions.map((option) => (
+                  <option key={`search-option-${option}`} value={option} />
+                ))}
+              </datalist>
             </label>
 
-            <label className={styles.selectWrap}>
-              <span className={styles.visuallyHidden}>Filter schedule source</span>
-              <select
-                className={styles.selectInput}
-                value={sourceFilter}
-                onChange={(event) => {
-                  setSourceFilter(event.target.value as SourceFilter);
-                  setPage(1);
-                }}
+            <div className={styles.filterMenuWrap}>
+              <button
+                type="button"
+                className={styles.filterMenuButton}
+                onClick={() => setScopeMenuOpen((current) => !current)}
+                aria-haspopup="menu"
+                aria-expanded={scopeMenuOpen}
+                aria-label="Search scope"
               >
-                <option value="all">All Sources</option>
-                <option value="Today">Today</option>
-                <option value="Tomorrow">Tomorrow</option>
-                <option value="Carryover">Carryover</option>
-              </select>
-            </label>
+                ≡ {searchScope === "all" ? "All" : capitalize(searchScope)}
+              </button>
+              {scopeMenuOpen ? (
+                <div className={styles.filterMenu} role="menu" aria-label="Search scope options">
+                  {( ["all", "vessel", "technician", "rigger", "shipwright"] as SearchScope[]).map((scope) => (
+                    <button
+                      key={`scope-${scope}`}
+                      type="button"
+                      role="menuitem"
+                      className={scope === searchScope ? `${styles.filterMenuItem} ${styles.filterMenuItemActive}` : styles.filterMenuItem}
+                      onClick={() => {
+                        setSearchScope(scope);
+                        setScopeMenuOpen(false);
+                      }}
+                    >
+                      {scope === "all" ? "All" : capitalize(scope)}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
 
             <label className={styles.selectWrap}>
               <span className={styles.visuallyHidden}>Filter task status</span>
@@ -170,7 +377,6 @@ export function SchedulePage({ data }: SchedulePageProps) {
                 value={taskFilter}
                 onChange={(event) => {
                   setTaskFilter(event.target.value as TaskFilter);
-                  setPage(1);
                 }}
               >
                 <option value="all">All Tasks</option>
@@ -181,102 +387,75 @@ export function SchedulePage({ data }: SchedulePageProps) {
           </div>
         </div>
 
-        <div className={styles.tableWrap}>
-          <table className={styles.dataTable}>
-            <thead>
-              <tr>
-                <th>Task</th>
-                <th>Vessel</th>
-                <th>Due</th>
-                <th>Priority</th>
-                <th>Slot</th>
-                <th>Rigger</th>
-                <th>Shipwright</th>
-                <th>Completion</th>
-                <th>Rationale</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pagedRows.map((item) => {
-                const isDone = Boolean(taskState[item.id]);
-                const rowClass = `${priorityRowClass(item.charterPriority)} ${isDone ? styles.taskRowDone : ""}`.trim();
+        <div className={styles.timelineStack}>
+          {dayView === "yesterday" ? (
+            <TimelineLane
+              title="Yesterday"
+              subtitle={`${yesterdayRows.length} vessels reviewed`}
+              rows={yesterdayRows}
+              reportDateIso={data.reportDateIso}
+              scheduleLocked={scheduleLocked}
+              taskState={taskState}
+              pendingTaskIds={pendingTaskIds}
+              onToggleTask={toggleTask}
+            />
+          ) : null}
 
-                return (
-                <tr key={item.id} className={rowClass}>
-                  <td>
-                    <label className={styles.taskToggle}>
-                      <input
-                        type="checkbox"
-                        checked={isDone}
-                        onChange={() => toggleTask(item.id)}
-                        className={styles.taskCheckbox}
-                        aria-label={`Mark task for ${item.boatName} as complete`}
-                      />
-                      <span>{isDone ? "Done" : "Open"}</span>
-                    </label>
-                  </td>
-                  <td>
-                    <p className={isDone ? `${styles.rowMain} ${styles.taskTextDone}` : styles.rowMain}>{item.boatName}</p>
-                    <p className={styles.rowMeta}>
-                      {item.source} | {item.stat}
-                      {item.charterPriorityFlag ? ` | Charter ${item.charterPriorityFlag}` : ""}
-                    </p>
-                  </td>
-                  <td>{item.dueDateLabel}</td>
-                  <td>
-                    <PriorityBadge priority={item.priority} />
-                  </td>
-                  <td>{item.timeWindow}</td>
-                  <td>
-                    <WorkerCell worker={item.rigger} />
-                  </td>
-                  <td>
-                    <WorkerCell worker={item.shipwright} />
-                  </td>
-                  <td>{item.completionPct}%</td>
-                  <td className={styles.longCell}>{item.rationale}</td>
-                </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+          {(dayView === "all" || dayView === "today") ? (
+            <TimelineLane
+              title="Today (Primary Focus)"
+              subtitle={`${todayRows.length} vessels scheduled for ${formatDateLabel(data.reportDateIso)}`}
+              rows={todayRows}
+              reportDateIso={data.reportDateIso}
+              scheduleLocked={scheduleLocked}
+              taskState={taskState}
+              pendingTaskIds={pendingTaskIds}
+              onToggleTask={toggleTask}
+            />
+          ) : null}
 
-        <div className={styles.pagerBar}>
-          <button
-            type="button"
-            className={styles.pagerButton}
-            onClick={() => setPage((current) => Math.max(1, current - 1))}
-            disabled={currentPage <= 1}
-          >
-            ←
-          </button>
+          {(dayView === "all" || dayView === "tomorrow") ? (
+            <TimelineLane
+              title="Tomorrow"
+              subtitle={`${tomorrowRows.length} vessels scheduled for ${formatDateLabel(nextOperationalIso)}`}
+              rows={tomorrowRows}
+              reportDateIso={data.reportDateIso}
+              scheduleLocked={scheduleLocked}
+              taskState={taskState}
+              pendingTaskIds={pendingTaskIds}
+              onToggleTask={toggleTask}
+            />
+          ) : null}
 
-          <div className={styles.pagerNumbers} aria-label="Schedule pages">
-            {Array.from({ length: totalPages }, (_, index) => index + 1).map((pageNumber) => (
-              <button
-                key={`schedule-page-${pageNumber}`}
-                type="button"
-                className={
-                  pageNumber === currentPage
-                    ? `${styles.pagerButton} ${styles.pagerButtonActive}`
-                    : styles.pagerButton
-                }
-                onClick={() => setPage(pageNumber)}
-              >
-                {pageNumber}
-              </button>
-            ))}
-          </div>
+          {(dayView === "all" || dayView === "nextWeek") ? (
+            upcomingDateGroups.map((group) => (
+              <TimelineLane
+                key={`upcoming-${group.dateIso}`}
+                title={`Upcoming: ${group.label}`}
+                subtitle={`${group.items.length} vessels in this operational block`}
+                rows={group.items}
+                reportDateIso={data.reportDateIso}
+                scheduleLocked={scheduleLocked}
+                taskState={taskState}
+                pendingTaskIds={pendingTaskIds}
+                onToggleTask={toggleTask}
+              />
+            ))
+          ) : null}
 
-          <button
-            type="button"
-            className={styles.pagerButton}
-            onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
-            disabled={currentPage >= totalPages}
-          >
-            →
-          </button>
+          {(dayView === "all" &&
+            todayRows.length === 0 &&
+            tomorrowRows.length === 0 &&
+            upcomingDateGroups.length === 0) ||
+          (dayView === "yesterday" && yesterdayRows.length === 0) ||
+          (dayView === "today" && todayRows.length === 0) ||
+          (dayView === "tomorrow" && tomorrowRows.length === 0) ||
+          (dayView === "nextWeek" && upcomingDateGroups.length === 0) ? (
+            <article className={styles.timelineEmpty}>
+              <p className={styles.rowMain}>No vessels match this timeline filter.</p>
+              <p className={styles.rowMeta}>Try clearing search text or switching the day scope.</p>
+            </article>
+          ) : null}
         </div>
       </section>
     </div>
@@ -293,15 +472,152 @@ function PriorityBadge({ priority }: { priority: AssignmentPlanItem["priority"] 
   return <span className={`${styles.statusBadge} ${styles.badgeMedium}`}>{priority}</span>;
 }
 
+function TimelineLane(input: {
+  title: string;
+  subtitle: string;
+  rows: AssignmentPlanItem[];
+  reportDateIso: string;
+  scheduleLocked: boolean;
+  taskState: Record<string, true>;
+  pendingTaskIds: Record<string, true>;
+  onToggleTask: (taskId: string) => void;
+}) {
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(input.rows.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const startIndex = (currentPage - 1) * PAGE_SIZE;
+  const pageRows = input.rows.slice(startIndex, startIndex + PAGE_SIZE);
+
+  return (
+    <article className={styles.timelineLane}>
+      <header className={styles.timelineLaneHeader}>
+        <h3 className={styles.timelineLaneTitle}>{input.title}</h3>
+        <p className={styles.timelineLaneMeta}>{input.subtitle}</p>
+      </header>
+      <div className={styles.timelineItems}>
+        {pageRows.map((item) => {
+          const isDone = Boolean(input.taskState[item.id]);
+          const departureDays = Number.isFinite(item.daysUntilDeparture)
+            ? Math.max(0, Math.trunc(item.daysUntilDeparture))
+            : daysUntilIsoFromReport(item.dueDate, input.reportDateIso);
+          const lockForToday =
+            input.scheduleLocked &&
+            item.dueDate === input.reportDateIso &&
+            (item.source === "Today" || item.source === "Carryover");
+          const cardClass = [
+            styles.timelineItemCard,
+            priorityRowClass(item.charterPriority),
+            departureDays <= 0 ? styles.departureDueTodayRow : "",
+            isDone ? styles.taskRowDone : "",
+          ]
+            .filter(Boolean)
+            .join(" ");
+
+          return (
+            <article key={item.id} className={cardClass}>
+              <div className={styles.timelineItemTop}>
+                <label className={styles.taskToggle}>
+                  <input
+                    type="checkbox"
+                    checked={isDone}
+                    onChange={() => input.onToggleTask(item.id)}
+                    disabled={Boolean(input.pendingTaskIds[item.id]) || lockForToday}
+                    className={styles.taskCheckbox}
+                    aria-label={`Mark task for ${item.boatName} as complete`}
+                  />
+                  <span>{isDone ? "Done" : lockForToday ? "Locked" : "Open"}</span>
+                </label>
+
+                <span className={departureCountdownClass(departureDays)}>
+                  {departureCountdownLabel(departureDays)}
+                </span>
+              </div>
+
+              <div className={styles.timelineTaskMeta}>
+                <div>
+                  <p className={isDone ? `${styles.rowMain} ${styles.taskTextDone}` : styles.rowMain}>
+                    {item.boatName}
+                  </p>
+                  <p className={styles.rowMeta}>
+                    Ops Date {item.dueDateLabel} | {item.source} | {item.stat}
+                    {item.charterPriorityFlag ? ` | Charter ${item.charterPriorityFlag}` : ""}
+                  </p>
+                </div>
+                <PriorityBadge priority={item.priority} />
+              </div>
+
+              <div className={styles.timelineWorkers}>
+                <WorkerCell worker={item.technician} />
+                <WorkerCell worker={item.rigger} />
+                <WorkerCell worker={item.shipwright} />
+              </div>
+
+              <p className={styles.timelineRationale}>{item.rationale}</p>
+            </article>
+          );
+        })}
+      </div>
+
+      {input.rows.length > PAGE_SIZE ? (
+        <div className={styles.timelinePager}>
+          <button
+            type="button"
+            className={styles.pagerButton}
+            onClick={() => setPage((value) => Math.max(1, value - 1))}
+            disabled={currentPage <= 1}
+            aria-label={`Previous vessels for ${input.title}`}
+          >
+            ←
+          </button>
+          <p className={styles.timelinePagerMeta}>
+            {startIndex + 1}-{Math.min(startIndex + PAGE_SIZE, input.rows.length)} of {input.rows.length}
+          </p>
+          <button
+            type="button"
+            className={styles.pagerButton}
+            onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
+            disabled={currentPage >= totalPages}
+            aria-label={`Next vessels for ${input.title}`}
+          >
+            →
+          </button>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 function WorkerCell({ worker }: { worker: AssignmentPlanItem["rigger"] }) {
   return (
-    <div>
+    <div className={styles.timelineWorker}>
       <p className={styles.rowMain}>{worker.workerLabel}</p>
       <p className={styles.rowMeta}>
         {worker.assignmentState} | quality {worker.qualityScore}% | load {worker.plannedLoad}
       </p>
     </div>
   );
+}
+
+function compareTimelineRows(left: AssignmentPlanItem, right: AssignmentPlanItem): number {
+  if (left.dueDate !== right.dueDate) {
+    return left.dueDate.localeCompare(right.dueDate);
+  }
+
+  const leftDays = Number.isFinite(left.daysUntilDeparture)
+    ? Math.max(0, Math.trunc(left.daysUntilDeparture))
+    : 99;
+  const rightDays = Number.isFinite(right.daysUntilDeparture)
+    ? Math.max(0, Math.trunc(right.daysUntilDeparture))
+    : 99;
+  if (leftDays !== rightDays) {
+    return leftDays - rightDays;
+  }
+
+  if (left.completionPct !== right.completionPct) {
+    return left.completionPct - right.completionPct;
+  }
+
+  return left.boatName.localeCompare(right.boatName);
 }
 
 function priorityRowClass(priority: CharterPriorityLevel): string {
@@ -314,33 +630,102 @@ function priorityRowClass(priority: CharterPriorityLevel): string {
   return "";
 }
 
-function loadTaskState(
-  storageKey: string,
-  rows: AssignmentPlanItem[],
-): Record<string, true> {
-  if (typeof window === "undefined") {
-    return {};
+function parseDayView(value: string | null): DayView {
+  if (value === "yesterday" || value === "today" || value === "tomorrow" || value === "nextWeek") {
+    return value;
   }
+  return "today";
+}
 
-  const validIds = new Set(rows.map((item) => item.id));
-  try {
-    const raw = window.localStorage.getItem(storageKey);
-    if (!raw) {
-      return {};
-    }
-    const parsed = JSON.parse(raw) as string[];
-    if (!Array.isArray(parsed)) {
-      return {};
-    }
-
-    const taskState: Record<string, true> = {};
-    for (const id of parsed) {
-      if (typeof id === "string" && validIds.has(id)) {
-        taskState[id] = true;
-      }
-    }
-    return taskState;
-  } catch {
-    return {};
+function capitalize(value: string): string {
+  if (!value) {
+    return value;
   }
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function isScheduleLocked(reportDateIso: string, now: Date): boolean {
+  const todayIso = toIsoDate(now);
+  if (todayIso > reportDateIso) {
+    return true;
+  }
+  if (todayIso < reportDateIso) {
+    return false;
+  }
+  return now.getHours() >= DAILY_CUTOFF_HOUR;
+}
+
+function departureCountdownLabel(days: number): string {
+  if (days <= 0) {
+    return "Due Today";
+  }
+  if (days === 1) {
+    return "1 day";
+  }
+  return `${days} days`;
+}
+
+function departureCountdownClass(days: number): string {
+  if (days <= 0) {
+    return `${styles.statusBadge} ${styles.departureCountdownDueToday}`;
+  }
+  if (days === 1) {
+    return `${styles.statusBadge} ${styles.departureCountdownDay1}`;
+  }
+  if (days === 2) {
+    return `${styles.statusBadge} ${styles.departureCountdownDay2}`;
+  }
+  if (days === 3) {
+    return `${styles.statusBadge} ${styles.departureCountdownDay3}`;
+  }
+  if (days === 4) {
+    return `${styles.statusBadge} ${styles.departureCountdownDay4}`;
+  }
+  return `${styles.statusBadge} ${styles.departureCountdownDay5}`;
+}
+
+function normalizeBoatKey(value: string): string {
+  return value
+    .trim()
+    .toUpperCase()
+    .replace(/\(.*?\)/g, "")
+    .replace(/[^A-Z0-9]+/g, "");
+}
+
+function parseIsoDate(value: string): Date {
+  const [year, month, day] = value.split("-").map((part) => Number(part));
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  }
+  return new Date(year, month - 1, day);
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function toIsoDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function daysUntilIsoFromReport(targetIso: string, reportIso: string): number {
+  const target = parseIsoDate(targetIso);
+  const report = parseIsoDate(reportIso);
+  const diffMs = target.getTime() - report.getTime();
+  return Math.floor(diffMs / (24 * 60 * 60 * 1000));
+}
+
+function formatDateLabel(dateIso: string): string {
+  const date = parseIsoDate(dateIso);
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
