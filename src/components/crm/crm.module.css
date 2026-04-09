@@ -349,6 +349,8 @@
   display: inline-flex;
   align-items: center;
   gap: 0.46rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .desktopActionPrimary {
@@ -367,6 +369,63 @@
 .desktopActionPrimary:focus-visible {
   transform: translateY(-1px);
   box-shadow: 0 8px 20px rgba(2, 132, 199, 0.24);
+}
+
+.desktopActionSecondary {
+  border-radius: 999px;
+  border: 1px solid rgba(12, 36, 63, 0.2);
+  background: #f8fcff;
+  color: #123250;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.38rem 0.68rem;
+  cursor: pointer;
+}
+
+.desktopActionSecondary:hover,
+.desktopActionSecondary:focus-visible {
+  border-color: rgba(2, 132, 199, 0.45);
+  box-shadow: 0 8px 18px rgba(2, 132, 199, 0.18);
+}
+
+.planningDateControls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  padding: 0.2rem 0.28rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(12, 36, 63, 0.12);
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.planningDateLabel {
+  display: inline-grid;
+  gap: 0.12rem;
+  font-size: 0.64rem;
+  color: #47637e;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.planningDateInput {
+  border: 1px solid rgba(12, 36, 63, 0.18);
+  border-radius: 0.56rem;
+  background: #ffffff;
+  color: #123250;
+  font-size: 0.72rem;
+  padding: 0.26rem 0.46rem;
+}
+
+.planningDateInput:focus {
+  outline: none;
+  border-color: rgba(2, 132, 199, 0.45);
+  box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.14);
+}
+
+.planningDateNote {
+  margin: 0.34rem 0.8rem 0;
+  font-size: 0.7rem;
+  color: #335777;
 }
 
 .desktopRoleHint {

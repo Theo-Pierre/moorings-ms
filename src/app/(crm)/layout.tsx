@@ -16,7 +16,9 @@ export default async function CrmLayout({ children }: { children: React.ReactNod
   return (
     <CrmShell
       appName={data.appName}
+      reportDateIso={data.reportDateIso}
       reportDateLabel={data.reportDateLabel}
+      planningDateOverride={data.planningDateOverride}
       session={session}
       workerRecommendations={workerRecommendations}
     >

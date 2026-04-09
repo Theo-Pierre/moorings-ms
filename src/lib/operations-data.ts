@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import * as XLSX from "xlsx";
 
+import { getPlanningDateOverride } from "./planning-date-override";
 import { listTeamOverrides, type TeamOverrideRecord } from "./team-overrides";
 
 type RoleStatus = 0 | 1 | 2;
@@ -210,6 +211,12 @@ export interface OperationsDashboardData {
   appName: string;
   reportDateIso: string;
   reportDateLabel: string;
+  planningDateOverride: {
+    active: boolean;
+    dateIso: string | null;
+    dateLabel: string | null;
+    updatedBy: string | null;
+  };
   previousDateLabel: string;
   nextDateLabel: string;
   summaryMetrics: SummaryMetric[];
@@ -476,6 +483,11 @@ interface VesselCharterPriority {
 interface ParsedOperationsSource {
   entries: TurnaroundEntry[];
   currentDay: CurrentDayData;
+  planningDateOverride: {
+    dateIso: string;
+    updatedAtMs: number;
+    updatedBy: string;
+  } | null;
   workerPools: WorkerPools;
   workerDirectory: {
     technicians: Map<number, string>;
@@ -774,6 +786,19 @@ async function loadOperationsDashboardData(): Promise<OperationsDashboardData> {
     appName: "moorings.ms",
     reportDateIso,
     reportDateLabel: formatDate(reportDate),
+    planningDateOverride: sourceData.planningDateOverride
+      ? {
+          active: true,
+          dateIso: sourceData.planningDateOverride.dateIso,
+          dateLabel: formatDate(parseDate(sourceData.planningDateOverride.dateIso)),
+          updatedBy: sourceData.planningDateOverride.updatedBy || null,
+        }
+      : {
+          active: false,
+          dateIso: null,
+          dateLabel: null,
+          updatedBy: null,
+        },
     previousDateLabel: formatDate(previousDate),
     nextDateLabel: formatDate(nextDate),
     summaryMetrics,
@@ -824,6 +849,7 @@ async function safeReadOperationsSourceData(): Promise<ParsedOperationsSource> {
         startsFigures: [],
         movements: [],
       },
+      planningDateOverride: null,
       workerPools: buildEmptyWorkerPools(),
       workerDirectory: {
         technicians: new Map<number, string>(),
@@ -851,7 +877,10 @@ async function readOperationsSourceData(): Promise<ParsedOperationsSource> {
 
   const dailyTargetRows = parseDailyTargetRows(workbook);
 
-  const reportDate = selectOperationalReportDate(dailyTargetRows);
+  const planningDateOverride = await getPlanningDateOverride();
+  const reportDate = planningDateOverride?.dateIso
+    ? parseDate(planningDateOverride.dateIso)
+    : selectOperationalReportDate(dailyTargetRows);
   const reportDateIso = toIsoDate(reportDate);
 
   const workerPools = await readTechWorkerPools();
@@ -909,6 +938,7 @@ async function readOperationsSourceData(): Promise<ParsedOperationsSource> {
       startsFigures,
       movements: [],
     },
+    planningDateOverride,
     workerPools,
     workerDirectory: {
       technicians: new Map(workerPools.technicians.map((worker) => [worker.id, worker.label])),

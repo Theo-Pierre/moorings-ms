@@ -14,7 +14,14 @@ import styles from "./crm.module.css";
 
 interface CrmShellProps {
   appName: string;
+  reportDateIso: string;
   reportDateLabel: string;
+  planningDateOverride: {
+    active: boolean;
+    dateIso: string | null;
+    dateLabel: string | null;
+    updatedBy: string | null;
+  };
   session: AuthSession;
   workerRecommendations: {
     technicians: string[];
@@ -34,12 +41,26 @@ const baseNavItems = [
   { href: "/reports", label: "Reports", icon: "wave" as const },
 ];
 
-export function CrmShell({ appName, reportDateLabel, session, workerRecommendations, children }: CrmShellProps) {
+export function CrmShell({
+  appName,
+  reportDateIso,
+  reportDateLabel,
+  planningDateOverride,
+  session,
+  workerRecommendations,
+  children,
+}: CrmShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [addVesselOpen, setAddVesselOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(getStoredSidebarPreference);
+  const [planningDateInput, setPlanningDateInput] = useState(
+    planningDateOverride.dateIso ?? reportDateIso,
+  );
+  const [planningDateSaving, setPlanningDateSaving] = useState(false);
+  const [planningDateMessage, setPlanningDateMessage] = useState("");
+  const canSetPlanningDate = session.role === "super-admin";
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -67,6 +88,10 @@ export function CrmShell({ appName, reportDateLabel, session, workerRecommendati
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [router]);
+
+  useEffect(() => {
+    setPlanningDateInput(planningDateOverride.dateIso ?? reportDateIso);
+  }, [planningDateOverride.dateIso, reportDateIso]);
 
   const navItems = useMemo(() => {
     if (session.role === "super-admin") {
@@ -103,6 +128,47 @@ export function CrmShell({ appName, reportDateLabel, session, workerRecommendati
   );
 
   const canAddVessel = session.role === "admin" || session.role === "super-admin";
+
+  async function savePlanningDateOverride(nextDateIso: string | null) {
+    if (!canSetPlanningDate || planningDateSaving) {
+      return;
+    }
+    setPlanningDateSaving(true);
+    setPlanningDateMessage("");
+    try {
+      const response = await fetch("/api/planning-date", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          dateIso: nextDateIso,
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | {
+            ok?: boolean;
+            error?: string;
+          }
+        | null;
+
+      if (!response.ok || !payload?.ok) {
+        setPlanningDateMessage(payload?.error || "Could not save planning date.");
+        return;
+      }
+
+      setPlanningDateMessage(
+        nextDateIso
+          ? `As-of date set to ${nextDateIso}.`
+          : "As-of date override cleared. Back to live day.",
+      );
+      router.refresh();
+    } catch {
+      setPlanningDateMessage("Could not save planning date.");
+    } finally {
+      setPlanningDateSaving(false);
+    }
+  }
 
   return (
     <div className={sidebarCollapsed ? `${styles.crmFrame} ${styles.crmFrameCollapsed}` : styles.crmFrame}>
@@ -154,10 +220,47 @@ export function CrmShell({ appName, reportDateLabel, session, workerRecommendati
             </p>
             <p className={styles.desktopSubtitle}>
               {roleLabel(session.role)} workspace | Ops date: {reportDateLabel}
+              {planningDateOverride.active && planningDateOverride.dateLabel
+                ? ` | As-of override: ${planningDateOverride.dateLabel}`
+                : ""}
             </p>
           </div>
 
           <div className={styles.desktopActions}>
+            {canSetPlanningDate ? (
+              <div className={styles.planningDateControls}>
+                <label className={styles.planningDateLabel}>
+                  <span>As-of Date</span>
+                  <input
+                    type="date"
+                    className={styles.planningDateInput}
+                    value={planningDateInput}
+                    onChange={(event) => setPlanningDateInput(event.target.value)}
+                    disabled={planningDateSaving}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className={styles.desktopActionSecondary}
+                  disabled={!planningDateInput || planningDateSaving}
+                  onClick={() => {
+                    void savePlanningDateOverride(planningDateInput);
+                  }}
+                >
+                  {planningDateSaving ? "Saving..." : "Apply"}
+                </button>
+                <button
+                  type="button"
+                  className={styles.desktopActionSecondary}
+                  disabled={planningDateSaving}
+                  onClick={() => {
+                    void savePlanningDateOverride(null);
+                  }}
+                >
+                  Clear
+                </button>
+              </div>
+            ) : null}
             {canAddVessel ? (
               <button
                 type="button"
@@ -173,6 +276,7 @@ export function CrmShell({ appName, reportDateLabel, session, workerRecommendati
             )}
           </div>
         </header>
+        {planningDateMessage ? <p className={styles.planningDateNote}>{planningDateMessage}</p> : null}
 
         <header className={styles.mobileHeader}>
           <Link href="/" prefetch className={styles.mobileBrand}>
