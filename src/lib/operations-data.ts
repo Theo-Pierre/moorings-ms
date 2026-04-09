@@ -540,7 +540,17 @@ async function loadOperationsDashboardData(): Promise<OperationsDashboardData> {
 
   const todayRowsRaw = turnaroundEntries.filter((entry) => entry.dateIso === reportDateIso);
   const previousRowsRaw = turnaroundEntries.filter((entry) => entry.dateIso === previousIso);
-  const tomorrowRowsRaw = turnaroundEntries.filter((entry) => entry.dateIso === nextIso);
+  const tomorrowRowsByOpsDate = turnaroundEntries.filter((entry) => entry.dateIso === nextIso);
+  const tomorrowRowsByDeparture = projectEntriesToOperationalDate(
+    dedupeByBoat(
+      turnaroundEntries
+        .filter((entry) => entry.departureDateIso === nextIso && entry.dateIso <= nextIso)
+        .map((entry) => ({ entry, source: "Tomorrow" as const })),
+    ).map((candidate) => candidate.entry),
+    nextIso,
+  );
+  const tomorrowRowsRaw =
+    tomorrowRowsByOpsDate.length > 0 ? tomorrowRowsByOpsDate : tomorrowRowsByDeparture;
   const nextWeekEndIso = toIsoDate(addDays(reportDate, 7));
   const nextWeekRowsRaw = turnaroundEntries.filter(
     (entry) => entry.dateIso > nextIso && entry.dateIso <= nextWeekEndIso,
@@ -2494,21 +2504,41 @@ function buildFleetRows(todayRows: TurnaroundEntry[], tomorrowRows: TurnaroundEn
     .slice(0, 26);
 }
 
+function projectEntriesToOperationalDate(
+  entries: TurnaroundEntry[],
+  targetDateIso: string,
+): TurnaroundEntry[] {
+  return entries.map((entry) => ({
+    ...entry,
+    id: `${targetDateIso}-${normalizeBoatName(entry.boatName)}`,
+    dateIso: targetDateIso,
+  }));
+}
+
 function buildPlanningEngine(input: {
   entries: TurnaroundEntry[];
   workerPools: WorkerPools;
   reportDate: Date;
 }): PlanningEngineData {
   const demandByDate = new Map<string, number>();
+  const departureDemandByDate = new Map<string, number>();
   for (const entry of input.entries) {
     demandByDate.set(entry.dateIso, (demandByDate.get(entry.dateIso) ?? 0) + 1);
+    if (isOperationalIsoDate(entry.departureDateIso)) {
+      departureDemandByDate.set(
+        entry.departureDateIso,
+        (departureDemandByDate.get(entry.departureDateIso) ?? 0) + 1,
+      );
+    }
   }
 
   const reportIso = toIsoDate(input.reportDate);
   const tomorrowIso = toIsoDate(addDays(input.reportDate, 1));
   const horizonDateSet = new Set<string>([reportIso, tomorrowIso]);
 
-  const sortedDates = [...demandByDate.keys()].sort((left, right) => left.localeCompare(right));
+  const sortedDates = [...new Set([...demandByDate.keys(), ...departureDemandByDate.keys()])].sort(
+    (left, right) => left.localeCompare(right),
+  );
   for (const dateIso of sortedDates) {
     if (dateIso >= reportIso) {
       horizonDateSet.add(dateIso);
@@ -2522,7 +2552,7 @@ function buildPlanningEngine(input: {
   const horizon = horizonDates.map((dateIso) =>
     buildDailyPlanningSnapshot({
       dateIso,
-      demandBoats: demandByDate.get(dateIso) ?? 0,
+      demandBoats: demandByDate.get(dateIso) ?? departureDemandByDate.get(dateIso) ?? 0,
       workerPools: input.workerPools,
     }),
   );
@@ -2531,14 +2561,14 @@ function buildPlanningEngine(input: {
     horizon.find((snapshot) => snapshot.dateIso === reportIso) ??
     buildDailyPlanningSnapshot({
       dateIso: reportIso,
-      demandBoats: demandByDate.get(reportIso) ?? 0,
+      demandBoats: demandByDate.get(reportIso) ?? departureDemandByDate.get(reportIso) ?? 0,
       workerPools: input.workerPools,
     });
   const tomorrow =
     horizon.find((snapshot) => snapshot.dateIso === tomorrowIso) ??
     buildDailyPlanningSnapshot({
       dateIso: tomorrowIso,
-      demandBoats: demandByDate.get(tomorrowIso) ?? 0,
+      demandBoats: demandByDate.get(tomorrowIso) ?? departureDemandByDate.get(tomorrowIso) ?? 0,
       workerPools: input.workerPools,
     });
 
