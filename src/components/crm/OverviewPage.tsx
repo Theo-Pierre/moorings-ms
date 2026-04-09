@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import type {
   AssignmentPlanItem,
@@ -25,8 +25,6 @@ interface OverviewPageProps {
   data: OperationsDashboardData;
 }
 
-const DAILY_CUTOFF_HOUR = 8;
-
 export function OverviewPage({ data }: OverviewPageProps) {
   const manualAssignmentRows = useManualAssignmentRows();
   const manualFleetRows = useManualFleetRows();
@@ -40,7 +38,6 @@ export function OverviewPage({ data }: OverviewPageProps) {
     const merged = [...manualFleetRows, ...data.fleetRows];
     return applyVesselOverridesToFleetRows(merged, vesselOverrides);
   }, [manualFleetRows, data.fleetRows, vesselOverrides]);
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const { taskState } = useSharedTaskState(
     data.reportDateIso,
     assignmentRows,
@@ -48,18 +45,6 @@ export function OverviewPage({ data }: OverviewPageProps) {
   const nextOperationalIso = useMemo(
     () => toIsoDate(addDays(parseIsoDate(data.reportDateIso), 1)),
     [data.reportDateIso],
-  );
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      setNowMs(Date.now());
-    }, 30000);
-    return () => window.clearInterval(interval);
-  }, []);
-
-  const scheduleLocked = useMemo(
-    () => isScheduleLocked(data.reportDateIso, new Date(nowMs)),
-    [data.reportDateIso, nowMs],
   );
 
   const completedYesterdayBoatKeys = useMemo(() => {
@@ -86,30 +71,7 @@ export function OverviewPage({ data }: OverviewPageProps) {
     [assignmentRows, completedYesterdayBoatKeys],
   );
 
-  const effectiveExecutionRows = useMemo(() => {
-    if (!scheduleLocked) {
-      return executionRows;
-    }
-
-    const todayRows = executionRows.filter(
-      (row) => row.source === "Today" || row.source === "Carryover",
-    );
-    const futureRows = executionRows.filter(
-      (row) => row.source !== "Today" && row.source !== "Carryover",
-    );
-    const lockedCompletedTodayRows = todayRows.filter((row) => Boolean(taskState[row.id]));
-    const rolledToTomorrowRows = todayRows
-      .filter((row) => !taskState[row.id])
-      .map((row) => ({
-        ...row,
-        source: "Carryover" as const,
-        dueDate: nextOperationalIso,
-        dueDateLabel: formatIsoForLabel(nextOperationalIso),
-        rationale: `${row.rationale} | Auto-carried after ${DAILY_CUTOFF_HOUR}:00 cutoff.`,
-      }));
-
-    return [...lockedCompletedTodayRows, ...futureRows, ...rolledToTomorrowRows];
-  }, [executionRows, nextOperationalIso, scheduleLocked, taskState]);
+  const effectiveExecutionRows = executionRows;
 
   const yesterdayRows = useMemo(
     () => assignmentRows.filter((item) => item.source === "Yesterday"),
@@ -213,9 +175,6 @@ export function OverviewPage({ data }: OverviewPageProps) {
           <p className={styles.pageSubtitle}>
             This system auto-evaluates demand, staffing capacity, and charter priority for {data.reportDateLabel} and{" "}
             {data.nextDateLabel}. It highlights shortages and recommendations before dispatch decisions are made.
-            {scheduleLocked
-              ? ` Daily cutoff reached (${DAILY_CUTOFF_HOUR}:00): open work is now carried into tomorrow planning.`
-              : ` Today remains live until ${DAILY_CUTOFF_HOUR}:00 local cutoff.`}
           </p>
         </div>
         <div className={styles.heroActions}>
@@ -703,17 +662,6 @@ function pluralizeRole(roleLabel: string, count: number): string {
     return "AC techs";
   }
   return `${roleLabel.toLowerCase()}s`;
-}
-
-function isScheduleLocked(reportDateIso: string, now: Date): boolean {
-  const todayIso = toIsoDate(now);
-  if (todayIso > reportDateIso) {
-    return true;
-  }
-  if (todayIso < reportDateIso) {
-    return false;
-  }
-  return now.getHours() >= DAILY_CUTOFF_HOUR;
 }
 
 function parseIsoDate(value: string): Date {

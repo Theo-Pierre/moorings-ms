@@ -20,7 +20,6 @@ import styles from "./crm.module.css";
 type TaskFilter = "all" | "open" | "done";
 type DayView = "all" | "yesterday" | "today" | "tomorrow" | "nextWeek";
 type SearchScope = "all" | "vessel" | "technician" | "rigger" | "shipwright";
-const DAILY_CUTOFF_HOUR = 8;
 const PAGE_SIZE = 5;
 
 interface SchedulePageProps {
@@ -41,7 +40,6 @@ export function SchedulePage({ data }: SchedulePageProps) {
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   const [dayView, setDayView] = useState<DayView>(requestedView);
   const [taskFilter, setTaskFilter] = useState<TaskFilter>("all");
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const { taskState, setTaskDone, pendingTaskIds } = useSharedTaskState(
     data.reportDateIso,
     assignmentRows,
@@ -55,20 +53,8 @@ export function SchedulePage({ data }: SchedulePageProps) {
   );
 
   useEffect(() => {
-    const interval = window.setInterval(() => {
-      setNowMs(Date.now());
-    }, 30000);
-    return () => window.clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
     setDayView(requestedView);
   }, [requestedView]);
-
-  const scheduleLocked = useMemo(
-    () => isScheduleLocked(data.reportDateIso, new Date(nowMs)),
-    [data.reportDateIso, nowMs],
-  );
 
   const completedYesterdayBoatKeys = useMemo(() => {
     const keys = new Set<string>();
@@ -94,31 +80,7 @@ export function SchedulePage({ data }: SchedulePageProps) {
     [assignmentRows, completedYesterdayBoatKeys],
   );
 
-  const effectiveExecutionRows = useMemo(() => {
-    if (!scheduleLocked) {
-      return executionRows;
-    }
-
-    const todayRows = executionRows.filter(
-      (row) => row.source === "Today" || row.source === "Carryover",
-    );
-    const futureRows = executionRows.filter(
-      (row) => row.source !== "Today" && row.source !== "Carryover",
-    );
-
-    const lockedCompletedTodayRows = todayRows.filter((row) => Boolean(taskState[row.id]));
-    const rolledToTomorrowRows = todayRows
-      .filter((row) => !taskState[row.id])
-      .map((row) => ({
-        ...row,
-        source: "Carryover" as const,
-        dueDate: nextOperationalIso,
-        dueDateLabel: formatDateLabel(nextOperationalIso),
-        rationale: `${row.rationale} | Auto-carried after ${DAILY_CUTOFF_HOUR}:00 cutoff.`,
-      }));
-
-    return [...lockedCompletedTodayRows, ...futureRows, ...rolledToTomorrowRows];
-  }, [executionRows, nextOperationalIso, scheduleLocked, taskState]);
+  const effectiveExecutionRows = executionRows;
 
   const rows = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -275,10 +237,7 @@ export function SchedulePage({ data }: SchedulePageProps) {
               Date-block timeline view: vessels are grouped by operational day in continuous order.
             </p>
             <p className={styles.sectionHint}>
-              Departure-first planning with {DAILY_CUTOFF_HOUR}:00 local cutoff.
-              {scheduleLocked
-                ? " Cutoff reached: today is locked and open vessels are auto-carried to tomorrow."
-                : " Today remains live until cutoff."}
+              Departure-first planning with live updates as tasks are completed.
             </p>
             <div className={styles.tabGroup}>
               <button
@@ -394,7 +353,6 @@ export function SchedulePage({ data }: SchedulePageProps) {
               subtitle={`${yesterdayRows.length} vessels reviewed`}
               rows={yesterdayRows}
               reportDateIso={data.reportDateIso}
-              scheduleLocked={scheduleLocked}
               taskState={taskState}
               pendingTaskIds={pendingTaskIds}
               onToggleTask={toggleTask}
@@ -407,7 +365,6 @@ export function SchedulePage({ data }: SchedulePageProps) {
               subtitle={`${todayRows.length} vessels scheduled for ${formatDateLabel(data.reportDateIso)}`}
               rows={todayRows}
               reportDateIso={data.reportDateIso}
-              scheduleLocked={scheduleLocked}
               taskState={taskState}
               pendingTaskIds={pendingTaskIds}
               onToggleTask={toggleTask}
@@ -420,7 +377,6 @@ export function SchedulePage({ data }: SchedulePageProps) {
               subtitle={`${tomorrowRows.length} vessels scheduled for ${formatDateLabel(nextOperationalIso)}`}
               rows={tomorrowRows}
               reportDateIso={data.reportDateIso}
-              scheduleLocked={scheduleLocked}
               taskState={taskState}
               pendingTaskIds={pendingTaskIds}
               onToggleTask={toggleTask}
@@ -435,7 +391,6 @@ export function SchedulePage({ data }: SchedulePageProps) {
                 subtitle={`${group.items.length} vessels in this operational block`}
                 rows={group.items}
                 reportDateIso={data.reportDateIso}
-                scheduleLocked={scheduleLocked}
                 taskState={taskState}
                 pendingTaskIds={pendingTaskIds}
                 onToggleTask={toggleTask}
@@ -477,7 +432,6 @@ function TimelineLane(input: {
   subtitle: string;
   rows: AssignmentPlanItem[];
   reportDateIso: string;
-  scheduleLocked: boolean;
   taskState: Record<string, true>;
   pendingTaskIds: Record<string, true>;
   onToggleTask: (taskId: string) => void;
@@ -500,10 +454,6 @@ function TimelineLane(input: {
           const departureDays = Number.isFinite(item.daysUntilDeparture)
             ? Math.max(0, Math.trunc(item.daysUntilDeparture))
             : daysUntilIsoFromReport(item.dueDate, input.reportDateIso);
-          const lockForToday =
-            input.scheduleLocked &&
-            item.dueDate === input.reportDateIso &&
-            (item.source === "Today" || item.source === "Carryover");
           const cardClass = [
             styles.timelineItemCard,
             priorityRowClass(item.charterPriority),
@@ -521,11 +471,11 @@ function TimelineLane(input: {
                     type="checkbox"
                     checked={isDone}
                     onChange={() => input.onToggleTask(item.id)}
-                    disabled={Boolean(input.pendingTaskIds[item.id]) || lockForToday}
+                    disabled={Boolean(input.pendingTaskIds[item.id])}
                     className={styles.taskCheckbox}
                     aria-label={`Mark task for ${item.boatName} as complete`}
                   />
-                  <span>{isDone ? "Done" : lockForToday ? "Locked" : "Open"}</span>
+                  <span>{isDone ? "Done" : "Open"}</span>
                 </label>
 
                 <span className={departureCountdownClass(departureDays)}>
@@ -642,17 +592,6 @@ function capitalize(value: string): string {
     return value;
   }
   return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function isScheduleLocked(reportDateIso: string, now: Date): boolean {
-  const todayIso = toIsoDate(now);
-  if (todayIso > reportDateIso) {
-    return true;
-  }
-  if (todayIso < reportDateIso) {
-    return false;
-  }
-  return now.getHours() >= DAILY_CUTOFF_HOUR;
 }
 
 function departureCountdownLabel(days: number): string {
