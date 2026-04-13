@@ -343,6 +343,11 @@ const autoSyncIntervalMinutes = clampNumber(
   10080,
 );
 const autoSyncIntervalMs = autoSyncIntervalMinutes * 60 * 1000;
+const initialSyncWaitMs = clampNumber(
+  Number(process.env.MOORINGS_INITIAL_SYNC_WAIT_MS || "6000"),
+  1000,
+  20000,
+);
 const dashboardCacheIntervalMs = clampNumber(
   Number(process.env.MOORINGS_DASHBOARD_CACHE_SECONDS || "5"),
   5,
@@ -964,9 +969,9 @@ async function ensureDriveDataIsFresh(): Promise<DriveSyncSnapshot | null> {
   if (!driveSyncPromise) {
     driveSyncPromise = synchronizeDriveFiles()
       .catch((error) => {
-      if (process.env.NODE_ENV !== "production") {
-        console.warn("[moorings.ms] Drive sync failed; serving local cached data.", error);
-      }
+        if (process.env.NODE_ENV !== "production") {
+          console.warn("[moorings.ms] Drive sync failed; serving local cached data.", error);
+        }
         return driveSyncCache?.snapshot ?? null;
       })
       .then((snapshot) => {
@@ -981,7 +986,22 @@ async function ensureDriveDataIsFresh(): Promise<DriveSyncSnapshot | null> {
       });
   }
 
-  // Keep request paths fast and resilient: do not block rendering on remote Drive sync.
+  // Prefer freshest workbook on cold starts: wait briefly for the first sync
+  // so daily planning does not remain pinned to stale bundled files.
+  if (!driveSyncCache?.snapshot && driveSyncPromise) {
+    try {
+      return await waitForPromiseWithTimeout(
+        driveSyncPromise,
+        initialSyncWaitMs,
+        "Drive sync warm-up timeout",
+      );
+    } catch (error) {
+      if (process.env.NODE_ENV !== "production") {
+        console.warn("[moorings.ms] Drive sync warm-up timed out; serving local fallback.", error);
+      }
+    }
+  }
+
   return driveSyncCache?.snapshot ?? null;
 }
 
@@ -1100,16 +1120,21 @@ async function selectLatestDriveFile(
     return null;
   }
 
-  const withModified = await Promise.all(
+  const withMetadata = await Promise.all(
     candidates.map(async (entry) => ({
       entry,
-      modifiedMs: await fetchDriveLastModifiedMs(entry.id),
+      metadata: await fetchDriveRemoteMetadata(entry.id),
+      modifiedLabelMs: parseDriveModifiedLabel(entry.modifiedLabel),
     })),
   );
 
-  withModified.sort((left, right) => {
-    if (left.modifiedMs !== right.modifiedMs) {
-      return right.modifiedMs - left.modifiedMs;
+  withMetadata.sort((left, right) => {
+    if (left.metadata.lastModifiedMs !== right.metadata.lastModifiedMs) {
+      return right.metadata.lastModifiedMs - left.metadata.lastModifiedMs;
+    }
+
+    if (left.modifiedLabelMs !== right.modifiedLabelMs) {
+      return right.modifiedLabelMs - left.modifiedLabelMs;
     }
 
     const leftDate = extractDateFromFileName(left.entry.name);
@@ -1118,10 +1143,14 @@ async function selectLatestDriveFile(
       return rightDate - leftDate;
     }
 
+    if (left.metadata.sizeBytes !== right.metadata.sizeBytes) {
+      return right.metadata.sizeBytes - left.metadata.sizeBytes;
+    }
+
     return right.entry.name.localeCompare(left.entry.name);
   });
 
-  return withModified[0].entry;
+  return withMetadata[0].entry;
 }
 
 async function selectLatestDriveFileByPatterns(
@@ -1135,11 +1164,6 @@ async function selectLatestDriveFileByPatterns(
     }
   }
   return null;
-}
-
-async function fetchDriveLastModifiedMs(fileId: string): Promise<number> {
-  const metadata = await fetchDriveRemoteMetadata(fileId);
-  return metadata.lastModifiedMs;
 }
 
 async function fetchDriveRemoteMetadata(fileId: string): Promise<RemoteDriveFileMetadata> {
@@ -1228,11 +1252,100 @@ function extractDateFromFileName(fileName: string): number {
     /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})(?:st|nd|rd|th)?[,]?\s+(\d{4})/i,
   );
   if (!match) {
-    return 0;
+    const dayMonthMatch = fileName.match(
+      /(\d{1,2})(?:st|nd|rd|th)?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[,]?\s+(\d{4})/i,
+    );
+    if (!dayMonthMatch) {
+      return 0;
+    }
+
+    const parsedFromDayMonth = Date.parse(
+      `${dayMonthMatch[2]} ${dayMonthMatch[1]} ${dayMonthMatch[3]}`,
+    );
+    return Number.isFinite(parsedFromDayMonth) ? parsedFromDayMonth : 0;
   }
 
   const parsedFromMonthName = Date.parse(`${match[1]} ${match[2]} ${match[3]}`);
   return Number.isFinite(parsedFromMonthName) ? parsedFromMonthName : 0;
+}
+
+function parseDriveModifiedLabel(label: string): number {
+  const value = cleanCellText(label)
+    .replace(/\u202F/g, " ")
+    .replace(/\u00A0/g, " ")
+    .trim();
+  if (!value) {
+    return 0;
+  }
+
+  const now = new Date();
+  const monthDayMatch = value.match(
+    /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})(?:,\s*(\d{4}))?$/i,
+  );
+  if (monthDayMatch) {
+    const year = monthDayMatch[3] ? Number(monthDayMatch[3]) : now.getFullYear();
+    const parsed = Date.parse(`${monthDayMatch[1]} ${monthDayMatch[2]} ${year}`);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  const timeMatch = value.match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i);
+  if (timeMatch) {
+    const hoursRaw = Number(timeMatch[1]);
+    const minutes = Number(timeMatch[2]);
+    const meridiem = timeMatch[3].toLowerCase();
+    if (
+      Number.isFinite(hoursRaw) &&
+      Number.isFinite(minutes) &&
+      hoursRaw >= 1 &&
+      hoursRaw <= 12 &&
+      minutes >= 0 &&
+      minutes <= 59
+    ) {
+      const hours24 = (hoursRaw % 12) + (meridiem === "pm" ? 12 : 0);
+      const parsed = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+        hours24,
+        minutes,
+        0,
+        0,
+      );
+      return parsed.getTime();
+    }
+  }
+
+  if (/^yesterday$/i.test(value)) {
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime();
+  }
+  if (/^today$/i.test(value)) {
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function waitForPromiseWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  errorMessage: string,
+): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(errorMessage));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
 }
 
 function stripTags(value: string): string {
