@@ -49,8 +49,14 @@ export interface ManualVesselInput {
   rationale: string;
 }
 
-const STORAGE_KEY = "moorings-ms:manual-vessels";
-const OVERRIDE_STORAGE_KEY = "moorings-ms:vessel-overrides";
+const STORAGE_NAMESPACE = "fleet-schedule-example";
+const STORAGE_KEY = `moorings-ms:manual-vessels:${STORAGE_NAMESPACE}`;
+const OVERRIDE_STORAGE_KEY = `moorings-ms:vessel-overrides:${STORAGE_NAMESPACE}`;
+const LEGACY_STORAGE_PREFIXES = [
+  "moorings-ms:manual-vessels:",
+  "moorings-ms:vessel-overrides:",
+];
+const STORAGE_CLEANUP_KEY = `moorings-ms:vessel-storage-cleaned:${STORAGE_NAMESPACE}`;
 const UPDATE_EVENT = "moorings-ms:manual-vessels-updated";
 
 export function useManualVessels(): ManualVesselRecord[] {
@@ -112,6 +118,8 @@ export function toAssignmentPlanItem(row: ManualVesselRecord): AssignmentPlanIte
     source: row.source,
     dueDate: row.dueDate,
     dueDateLabel: formatDateLabel(row.dueDate),
+    departureDate: row.dueDate,
+    departureDateLabel: formatDateLabel(row.dueDate),
     daysUntilDeparture: daysUntilDateIso(row.dueDate),
     timeWindow: row.timeWindow || "08:00 - 10:00",
     priority: row.priority,
@@ -195,6 +203,7 @@ function loadManualVessels(): ManualVesselRecord[] {
   if (typeof window === "undefined") {
     return [];
   }
+  clearLegacyVesselStorage();
 
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -448,10 +457,17 @@ export function upsertVesselOverride(input: {
         ? clampPercentage(input.completionPct)
         : previous?.completionPct,
     assignedTechnician:
-      normalizeOptionalText(input.assignedTechnician) ?? previous?.assignedTechnician,
-    assignedRigger: normalizeOptionalText(input.assignedRigger) ?? previous?.assignedRigger,
+      input.assignedTechnician !== undefined
+        ? normalizeOptionalText(input.assignedTechnician) ?? ""
+        : previous?.assignedTechnician,
+    assignedRigger:
+      input.assignedRigger !== undefined
+        ? normalizeOptionalText(input.assignedRigger) ?? ""
+        : previous?.assignedRigger,
     assignedShipwright:
-      normalizeOptionalText(input.assignedShipwright) ?? previous?.assignedShipwright,
+      input.assignedShipwright !== undefined
+        ? normalizeOptionalText(input.assignedShipwright) ?? ""
+        : previous?.assignedShipwright,
     note: normalizeOptionalText(input.note) ?? previous?.note,
     deleted: typeof input.deleted === "boolean" ? input.deleted : previous?.deleted ?? false,
     updatedAtIso: new Date().toISOString(),
@@ -475,6 +491,45 @@ export function removeVesselOverride(boatKey: string) {
   saveVesselOverrides(current);
 }
 
+export function clearAllVesselOverrides() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.removeItem(OVERRIDE_STORAGE_KEY);
+  window.dispatchEvent(new Event(UPDATE_EVENT));
+}
+
+export function getVesselOverrideSnapshot(boatKey: string): VesselOverrideRecord | null {
+  const key = normalizeVesselKey(boatKey);
+  if (!key) {
+    return null;
+  }
+  const current = loadVesselOverrides();
+  const value = current[key];
+  return value ? { ...value } : null;
+}
+
+export function restoreVesselOverrideSnapshot(
+  boatKey: string,
+  snapshot: VesselOverrideRecord | null,
+) {
+  const key = normalizeVesselKey(boatKey);
+  if (!key) {
+    return;
+  }
+  const current = loadVesselOverrides();
+  if (snapshot) {
+    current[key] = {
+      ...snapshot,
+      boatKey: key,
+      updatedAtIso: new Date().toISOString(),
+    };
+  } else {
+    delete current[key];
+  }
+  saveVesselOverrides(current);
+}
+
 export function applyVesselOverridesToAssignmentRows(
   rows: AssignmentPlanItem[],
   overrides: Record<string, VesselOverrideRecord>,
@@ -487,6 +542,7 @@ export function applyVesselOverridesToAssignmentRows(
       }
 
       const dueDate = override.dueDate || row.dueDate;
+      const departureDate = override.dueDate || row.departureDate || row.dueDate;
       const technicianLabel = override.assignedTechnician || row.technician.workerLabel;
       const riggerLabel = override.assignedRigger || row.rigger.workerLabel;
       const shipwrightLabel = override.assignedShipwright || row.shipwright.workerLabel;
@@ -497,22 +553,24 @@ export function applyVesselOverridesToAssignmentRows(
         stat: override.stat || row.stat,
         dueDate,
         dueDateLabel: formatDateLabel(dueDate),
-        daysUntilDeparture: daysUntilDateIso(dueDate),
+        departureDate,
+        departureDateLabel: formatDateLabel(departureDate),
+        daysUntilDeparture: daysUntilDateIso(departureDate),
         completionPct: typeof override.completionPct === "number" ? override.completionPct : row.completionPct,
         technician: {
           ...row.technician,
           workerLabel: technicianLabel,
-          assignmentState: technicianLabel ? "Assigned" : row.technician.assignmentState,
+          assignmentState: technicianLabel ? "Assigned" : "Unassigned",
         },
         rigger: {
           ...row.rigger,
           workerLabel: riggerLabel,
-          assignmentState: riggerLabel ? "Assigned" : row.rigger.assignmentState,
+          assignmentState: riggerLabel ? "Assigned" : "Unassigned",
         },
         shipwright: {
           ...row.shipwright,
           workerLabel: shipwrightLabel,
-          assignmentState: shipwrightLabel ? "Assigned" : row.shipwright.assignmentState,
+          assignmentState: shipwrightLabel ? "Assigned" : "Unassigned",
         },
         rationale: override.note || row.rationale,
       } satisfies AssignmentPlanItem;
@@ -581,6 +639,7 @@ function loadVesselOverrides(): Record<string, VesselOverrideRecord> {
   if (typeof window === "undefined") {
     return {};
   }
+  clearLegacyVesselStorage();
 
   try {
     const raw = window.localStorage.getItem(OVERRIDE_STORAGE_KEY);
@@ -628,6 +687,30 @@ function saveVesselOverrides(overrides: Record<string, VesselOverrideRecord>) {
   }
   window.localStorage.setItem(OVERRIDE_STORAGE_KEY, JSON.stringify(overrides));
   window.dispatchEvent(new Event(UPDATE_EVENT));
+}
+
+function clearLegacyVesselStorage() {
+  if (window.localStorage.getItem(STORAGE_CLEANUP_KEY) === "1") {
+    return;
+  }
+
+  const keysToRemove: string[] = [];
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const key = window.localStorage.key(index);
+    if (
+      key &&
+      key !== STORAGE_KEY &&
+      key !== OVERRIDE_STORAGE_KEY &&
+      LEGACY_STORAGE_PREFIXES.some((prefix) => key.startsWith(prefix))
+    ) {
+      keysToRemove.push(key);
+    }
+  }
+
+  for (const key of keysToRemove) {
+    window.localStorage.removeItem(key);
+  }
+  window.localStorage.setItem(STORAGE_CLEANUP_KEY, "1");
 }
 
 function lookupVesselOverride(

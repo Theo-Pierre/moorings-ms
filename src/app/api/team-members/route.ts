@@ -30,6 +30,7 @@ export async function POST(request: Request) {
     previousRole: TeamRoleKey;
     previousLabel: string;
     daysOff: string[];
+    backAtWorkDateIso: string | null;
   }>;
 
   if (
@@ -55,6 +56,10 @@ export async function POST(request: Request) {
   const positionLabel = typeof payload.positionLabel === "string" ? payload.positionLabel.trim() : "";
   const previousRole = isTeamRole(payload.previousRole) ? payload.previousRole : null;
   const previousLabel = typeof payload.previousLabel === "string" ? payload.previousLabel.trim() : "";
+  const backAtWorkDateIso =
+    typeof payload.backAtWorkDateIso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(payload.backAtWorkDateIso.trim())
+      ? payload.backAtWorkDateIso.trim()
+      : null;
 
   const record = await addTeamOverride({
     action: payload.action,
@@ -64,6 +69,7 @@ export async function POST(request: Request) {
     previousRole,
     previousLabel,
     daysOff,
+    backAtWorkDateIso,
     createdBy: session.email,
   });
 

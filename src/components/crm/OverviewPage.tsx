@@ -163,8 +163,8 @@ export function OverviewPage({ data }: OverviewPageProps) {
     [liveTodaySnapshot, liveTomorrowSnapshot],
   );
   const importantSummary = useMemo(
-    () => buildImportantSummary(liveAlerts, liveRecommendations),
-    [liveAlerts, liveRecommendations],
+    () => buildImportantSummary(liveAlerts, liveRecommendations, data.planningEngine.horizon),
+    [data.planningEngine.horizon, liveAlerts, liveRecommendations],
   );
 
   return (
@@ -467,7 +467,11 @@ function formatIsoForLabel(dateIso: string): string {
   });
 }
 
-function buildImportantSummary(alerts: string[], recommendations: string[]) {
+function buildImportantSummary(
+  alerts: string[],
+  recommendations: string[],
+  horizon: DailyPlanningSnapshot[],
+) {
   const technical: string[] = [];
   const support: string[] = [];
   const action: string[] = [];
@@ -498,6 +502,23 @@ function buildImportantSummary(alerts: string[], recommendations: string[]) {
     action.push(message);
   }
 
+  const nextSeven = horizon.slice(0, 7);
+  if (nextSeven.length > 0) {
+    const demandTotal = nextSeven.reduce((sum, day) => sum + day.demandBoats, 0);
+    const dailyRanges = buildDailySupportRanges(nextSeven);
+
+    if (dailyRanges.length > 0) {
+      support.unshift(
+        `Next 7 days: ${demandTotal} boats planned. If daily targets slip, call in ${dailyRanges.join(", ")}.`,
+      );
+      support.push("Use the daily shortfall trend to book temporary support before bottleneck days.");
+    } else {
+      support.unshift(
+        `Next 7 days: ${demandTotal} boats planned with current team coverage on track.`,
+      );
+    }
+  }
+
   return [
     {
       title: "Technical Feedback",
@@ -524,6 +545,30 @@ function cleanSummaryMessage(value: string): string {
     .replace(/workforce is sufficient/gi, "workforce is sufficient for target demand")
     .replace(/\s{2,}/g, " ")
     .trim();
+}
+
+function buildDailySupportRanges(horizon: DailyPlanningSnapshot[]): string[] {
+  const targetRoles = ["Technician", "Rigger", "Shipwright"];
+  const ranges: string[] = [];
+
+  for (const roleLabel of targetRoles) {
+    const values = horizon
+      .map((day) => day.roles.find((role) => role.roleLabel === roleLabel)?.shortageWorkers ?? 0)
+      .filter((value) => value > 0);
+    if (values.length === 0) {
+      continue;
+    }
+
+    const min = Math.max(1, Math.min(...values));
+    const max = Math.max(min, Math.max(...values));
+    ranges.push(
+      max > min
+        ? `${min}-${max} ${pluralizeRole(roleLabel, max).toLowerCase()}/day`
+        : `${max} ${pluralizeRole(roleLabel, max).toLowerCase()}/day`,
+    );
+  }
+
+  return ranges;
 }
 
 function normalizeBoatKey(value: string): string {

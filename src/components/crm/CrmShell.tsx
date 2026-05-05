@@ -4,12 +4,25 @@ import mooringsLogo from "@/assets/moorings-logo.png";
 import sunsailLogo from "@/assets/sunsail-logo.png";
 import { logoutAction } from "@/app/auth/actions";
 import type { AuthSession } from "@/lib/auth";
+import type { DailyApprovalData, WorkforceRoleKey } from "@/lib/operations-data";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
-import { addManualVessel } from "./manual-vessels";
+import {
+  addManualVessel,
+  getVesselOverrideSnapshot,
+  upsertVesselOverride,
+} from "./manual-vessels";
+import {
+  applyUndoAction,
+  getUndoUpdateEventName,
+  hasUndoActions,
+  peekUndoAction,
+  popUndoAction,
+  pushUndoAction,
+} from "./undo-stack";
 import styles from "./crm.module.css";
 
 interface CrmShellProps {
@@ -28,6 +41,7 @@ interface CrmShellProps {
     riggers: string[];
     shipwrights: string[];
   };
+  dailyApproval: DailyApprovalData;
   children: React.ReactNode;
 }
 
@@ -48,6 +62,7 @@ export function CrmShell({
   planningDateOverride,
   session,
   workerRecommendations,
+  dailyApproval,
   children,
 }: CrmShellProps) {
   const pathname = usePathname();
@@ -60,7 +75,16 @@ export function CrmShell({
   );
   const [planningDateSaving, setPlanningDateSaving] = useState(false);
   const [planningDateMessage, setPlanningDateMessage] = useState("");
+  const [undoBusy, setUndoBusy] = useState(false);
+  const [undoAvailable, setUndoAvailable] = useState(false);
+  const [approvalOpen, setApprovalOpen] = useState(false);
+  const [approvalRequired, setApprovalRequired] = useState(false);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [approvalMessage, setApprovalMessage] = useState<string | null>(null);
+  const [approvalSelections, setApprovalSelections] = useState<Record<string, string[]>>({});
   const canSetPlanningDate = session.role === "super-admin";
+  const canUndo = session.role !== "viewer";
+  const canApproveScheduling = session.role === "super-admin" || session.role === "admin";
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -70,28 +94,45 @@ export function CrmShell({
   }, [sidebarCollapsed]);
 
   useEffect(() => {
+    setPlanningDateInput(planningDateOverride.dateIso ?? reportDateIso);
+  }, [planningDateOverride.dateIso, reportDateIso]);
+
+  useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
-
-    const refresh = () => router.refresh();
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") {
-        refresh();
-      }
-    };
-
-    window.addEventListener("focus", refresh);
-    document.addEventListener("visibilitychange", onVisibility);
+    const syncUndoAvailability = () => setUndoAvailable(hasUndoActions());
+    syncUndoAvailability();
+    const undoEvent = getUndoUpdateEventName();
+    window.addEventListener(undoEvent, syncUndoAvailability);
     return () => {
-      window.removeEventListener("focus", refresh);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener(undoEvent, syncUndoAvailability);
     };
-  }, [router]);
+  }, []);
 
   useEffect(() => {
-    setPlanningDateInput(planningDateOverride.dateIso ?? reportDateIso);
-  }, [planningDateOverride.dateIso, reportDateIso]);
+    if (!canApproveScheduling || typeof window === "undefined") {
+      setApprovalRequired(false);
+      return;
+    }
+    const key = approvalStorageKey({
+      dateIso: dailyApproval.dateIso,
+      email: session.email,
+    });
+    const approved = window.localStorage.getItem(key) === "approved";
+    setApprovalRequired(!approved);
+    if (!approved) {
+      setApprovalOpen(true);
+    }
+  }, [canApproveScheduling, dailyApproval.dateIso, session.email]);
+
+  useEffect(() => {
+    const next: Record<string, string[]> = {};
+    for (const shortage of dailyApproval.shortages) {
+      next[shortage.roleKey] = shortage.candidateWorkers.slice(0, shortage.neededWorkers);
+    }
+    setApprovalSelections(next);
+  }, [dailyApproval.shortages]);
 
   const navItems = useMemo(() => {
     if (session.role === "super-admin") {
@@ -129,10 +170,15 @@ export function CrmShell({
 
   const canAddVessel = session.role === "admin" || session.role === "super-admin";
 
-  async function savePlanningDateOverride(nextDateIso: string | null) {
+  async function savePlanningDateOverride(
+    nextDateIso: string | null,
+    options?: { recordUndo?: boolean; previousDateIso?: string | null },
+  ) {
     if (!canSetPlanningDate || planningDateSaving) {
       return;
     }
+    const shouldRecordUndo = options?.recordUndo !== false;
+    const previousDateIso = options?.previousDateIso ?? (planningDateOverride.dateIso ?? null);
     setPlanningDateSaving(true);
     setPlanningDateMessage("");
     try {
@@ -162,12 +208,166 @@ export function CrmShell({
           ? `As-of date set to ${nextDateIso}.`
           : "As-of date override cleared. Back to live day.",
       );
+      if (shouldRecordUndo && previousDateIso !== nextDateIso) {
+        pushUndoAction({
+          type: "planning-date",
+          previousDateIso,
+          nextDateIso,
+          createdAtIso: new Date().toISOString(),
+        });
+      }
+      if (typeof window !== "undefined") {
+        window.location.reload();
+        return;
+      }
       router.refresh();
     } catch {
       setPlanningDateMessage("Could not save planning date.");
     } finally {
       setPlanningDateSaving(false);
     }
+  }
+
+  async function handleUndo() {
+    if (undoBusy) {
+      return;
+    }
+    const action = peekUndoAction();
+    if (!action) {
+      setPlanningDateMessage("No undo actions available in this session.");
+      setUndoAvailable(false);
+      return;
+    }
+
+    if (action.type === "planning-date") {
+      popUndoAction();
+      setUndoBusy(true);
+      try {
+        await savePlanningDateOverride(action.previousDateIso, {
+          recordUndo: false,
+          previousDateIso: action.nextDateIso,
+        });
+      } finally {
+        setUndoBusy(false);
+      }
+      return;
+    }
+
+    if (action.type === "task-completion") {
+      setUndoBusy(true);
+      try {
+        const response = await fetch("/api/schedule-task-state", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            reportDateIso: action.reportDateIso,
+            taskId: action.taskId,
+            done: action.previousDone,
+            completedBy: action.previousMeta?.completedBy,
+            completedAtIso: action.previousMeta?.completedAtIso,
+            note: action.previousMeta?.note,
+            preCompleted: action.previousMeta?.preCompleted,
+          }),
+        });
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        if (!response.ok) {
+          throw new Error(payload?.error || "Could not undo task update.");
+        }
+        popUndoAction();
+        setPlanningDateMessage("Last task update was undone.");
+        router.refresh();
+      } catch (error) {
+        setPlanningDateMessage(
+          error instanceof Error ? error.message : "Could not undo task update.",
+        );
+      } finally {
+        setUndoBusy(false);
+      }
+      return;
+    }
+
+    popUndoAction();
+    applyUndoAction(action);
+    setPlanningDateMessage("Last vessel change was undone.");
+    router.refresh();
+    setUndoAvailable(hasUndoActions());
+  }
+
+  async function saveSchedulingApproval() {
+    if (!canApproveScheduling || approvalBusy) {
+      return;
+    }
+    setApprovalBusy(true);
+    setApprovalMessage(null);
+    try {
+      for (const shortage of dailyApproval.shortages) {
+        const selectedWorkers = approvalSelections[shortage.roleKey] ?? [];
+        const response = await fetch("/api/daily-callins", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            dateIso: dailyApproval.dateIso,
+            role: shortage.roleKey,
+            workerLabels: selectedWorkers,
+          }),
+        });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(payload?.error || "Could not save call-in approvals.");
+        }
+      }
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(
+          approvalStorageKey({
+            dateIso: dailyApproval.dateIso,
+            email: session.email,
+          }),
+          "approved",
+        );
+      }
+      setApprovalRequired(false);
+      setApprovalOpen(false);
+      setApprovalMessage("Scheduling approved and workforce call-ins applied.");
+      router.refresh();
+    } catch (error) {
+      setApprovalMessage(error instanceof Error ? error.message : "Could not save approval.");
+    } finally {
+      setApprovalBusy(false);
+    }
+  }
+
+  function applyApprovalAssignmentOverride(inputOverride: {
+    vessel: string;
+    technician: string;
+    rigger: string;
+    shipwright: string;
+  }): boolean {
+    const previous = getVesselOverrideSnapshot(inputOverride.vessel);
+    const next = upsertVesselOverride({
+      boatKey: inputOverride.vessel,
+      assignedTechnician: inputOverride.technician,
+      assignedRigger: inputOverride.rigger,
+      assignedShipwright: inputOverride.shipwright,
+    });
+
+    if (!next) {
+      setApprovalMessage(`Could not update ${inputOverride.vessel}.`);
+      return false;
+    }
+
+    pushUndoAction({
+      type: "vessel-override",
+      boatKey: inputOverride.vessel,
+      previous,
+      next,
+      createdAtIso: new Date().toISOString(),
+    });
+    setApprovalMessage(`Updated assignments for ${inputOverride.vessel}.`);
+    return true;
   }
 
   return (
@@ -227,6 +427,31 @@ export function CrmShell({
           </div>
 
           <div className={styles.desktopActions}>
+            {canUndo ? (
+              <button
+                type="button"
+                className={styles.desktopActionSecondary}
+                disabled={!undoAvailable || undoBusy || planningDateSaving}
+                onClick={() => {
+                  void handleUndo();
+                }}
+              >
+                {undoBusy ? "Undoing..." : "Undo"}
+              </button>
+            ) : null}
+            {canApproveScheduling ? (
+              <button
+                type="button"
+                className={
+                  approvalRequired
+                    ? `${styles.desktopActionSecondary} ${styles.approvalNoticeButton}`
+                    : styles.desktopActionSecondary
+                }
+                onClick={() => setApprovalOpen(true)}
+              >
+                {approvalRequired ? "Scheduling Approval Required" : "Review Scheduling Approval"}
+              </button>
+            ) : null}
             {canSetPlanningDate ? (
               <div className={styles.planningDateControls}>
                 <label className={styles.planningDateLabel}>
@@ -244,7 +469,9 @@ export function CrmShell({
                   className={styles.desktopActionSecondary}
                   disabled={!planningDateInput || planningDateSaving}
                   onClick={() => {
-                    void savePlanningDateOverride(planningDateInput);
+                    void savePlanningDateOverride(planningDateInput, {
+                      previousDateIso: planningDateOverride.dateIso ?? null,
+                    });
                   }}
                 >
                   {planningDateSaving ? "Saving..." : "Apply"}
@@ -254,7 +481,9 @@ export function CrmShell({
                   className={styles.desktopActionSecondary}
                   disabled={planningDateSaving}
                   onClick={() => {
-                    void savePlanningDateOverride(null);
+                    void savePlanningDateOverride(null, {
+                      previousDateIso: planningDateOverride.dateIso ?? null,
+                    });
                   }}
                 >
                   Clear
@@ -277,6 +506,7 @@ export function CrmShell({
           </div>
         </header>
         {planningDateMessage ? <p className={styles.planningDateNote}>{planningDateMessage}</p> : null}
+        {approvalMessage ? <p className={styles.planningDateNote}>{approvalMessage}</p> : null}
 
         <header className={styles.mobileHeader}>
           <Link href="/" prefetch className={styles.mobileBrand}>
@@ -333,6 +563,31 @@ export function CrmShell({
           workerRecommendations={workerRecommendations}
           onClose={() => setAddVesselOpen(false)}
           onCreated={() => setAddVesselOpen(false)}
+        />
+      ) : null}
+      {approvalOpen && canApproveScheduling ? (
+        <DailySchedulingApprovalDialog
+          key={`approval-${dailyApproval.dateIso}-${dailyApproval.assignments.length}`}
+          dailyApproval={dailyApproval}
+          workerRecommendations={workerRecommendations}
+          selections={approvalSelections}
+          onChangeSelection={(roleKey, labels) =>
+            setApprovalSelections((current) => ({
+              ...current,
+              [roleKey]: labels,
+            }))
+          }
+          onApplyAssignmentOverride={applyApprovalAssignmentOverride}
+          onApprove={() => {
+            void saveSchedulingApproval();
+          }}
+          onDecline={() => {
+            setApprovalOpen(false);
+            setApprovalMessage("Scheduling approval pending. Edit allocations in Schedule and approve when ready.");
+            void router.push("/schedule");
+          }}
+          onClose={() => setApprovalOpen(false)}
+          busy={approvalBusy}
         />
       ) : null}
     </div>
@@ -438,6 +693,477 @@ function roleLabel(role: AuthSession["role"]): string {
     return "Admin";
   }
   return "Viewer";
+}
+
+function approvalStorageKey(input: { dateIso: string; email: string }): string {
+  return `moorings-ms:scheduling-approval:${input.dateIso}:${input.email.toLowerCase()}`;
+}
+
+function normalizeWorkerOption(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizeUnassignedLabel(value: string): string {
+  const cleaned = value.trim();
+  if (!cleaned) {
+    return "Unassigned";
+  }
+  const normalized = normalizeWorkerOption(cleaned);
+  if (
+    normalized === "unassigned" ||
+    normalized === "pending assignment" ||
+    normalized === "pending"
+  ) {
+    return "Unassigned";
+  }
+  return cleaned;
+}
+
+function uniqueWorkerOptions(values: string[]): string[] {
+  const byKey = new Map<string, string>();
+  for (const raw of values) {
+    const label = normalizeUnassignedLabel(raw);
+    const key = normalizeWorkerOption(label);
+    if (!key) {
+      continue;
+    }
+    if (!byKey.has(key)) {
+      byKey.set(key, label);
+    }
+  }
+
+  const labels = [...byKey.values()];
+  const hasUnassigned = labels.some((label) => normalizeWorkerOption(label) === "unassigned");
+  const others = labels
+    .filter((label) => normalizeWorkerOption(label) !== "unassigned")
+    .sort((left, right) => left.localeCompare(right));
+
+  return hasUnassigned ? ["Unassigned", ...others] : others;
+}
+
+function DailySchedulingApprovalDialog(input: {
+  dailyApproval: DailyApprovalData;
+  workerRecommendations: {
+    technicians: string[];
+    riggers: string[];
+    shipwrights: string[];
+  };
+  selections: Record<string, string[]>;
+  onChangeSelection: (roleKey: WorkforceRoleKey, labels: string[]) => void;
+  onApplyAssignmentOverride: (input: {
+    vessel: string;
+    technician: string;
+    rigger: string;
+    shipwright: string;
+  }) => boolean;
+  onApprove: () => void;
+  onDecline: () => void;
+  onClose: () => void;
+  busy: boolean;
+}) {
+  const [tab, setTab] = useState<"summary" | "workforce">("summary");
+  const [editableAssignments, setEditableAssignments] = useState(() => input.dailyApproval.assignments);
+  const [expandedAssignmentKey, setExpandedAssignmentKey] = useState<string | null>(null);
+  const [draftAssignments, setDraftAssignments] = useState<
+    Record<
+      string,
+      {
+        technician: string;
+        rigger: string;
+        shipwright: string;
+      }
+    >
+  >({});
+  const [assignmentMessage, setAssignmentMessage] = useState<string | null>(null);
+
+  function toggleWorker(roleKey: WorkforceRoleKey, workerLabel: string) {
+    const current = input.selections[roleKey] ?? [];
+    const exists = current.includes(workerLabel);
+    const next = exists
+      ? current.filter((label) => label !== workerLabel)
+      : [...current, workerLabel];
+    input.onChangeSelection(roleKey, next);
+  }
+
+  function getAssignmentKey(vessel: string, index: number): string {
+    return `${index}:${vessel}`;
+  }
+
+  function getDraftForAssignment(
+    assignment: DailyApprovalData["assignments"][number],
+    key: string,
+  ): {
+    technician: string;
+    rigger: string;
+    shipwright: string;
+  } {
+    return (
+      draftAssignments[key] ?? {
+        technician: assignment.technician,
+        rigger: assignment.rigger,
+        shipwright: assignment.shipwright,
+      }
+    );
+  }
+
+  function updateDraftAssignment(
+    key: string,
+    role: "technician" | "rigger" | "shipwright",
+    value: string,
+  ) {
+    setDraftAssignments((current) => {
+      const base = current[key] ?? {
+        technician: "",
+        rigger: "",
+        shipwright: "",
+      };
+      return {
+        ...current,
+        [key]: {
+          ...base,
+          [role]: value,
+        },
+      };
+    });
+  }
+
+  function roleOptions(
+    role: "technician" | "rigger" | "shipwright",
+    fallbackLabel: string,
+  ): string[] {
+    const fromAssignments =
+      role === "technician"
+        ? editableAssignments.map((item) => item.technician)
+        : role === "rigger"
+          ? editableAssignments.map((item) => item.rigger)
+          : editableAssignments.map((item) => item.shipwright);
+    const fromRecommendations =
+      role === "technician"
+        ? input.workerRecommendations.technicians
+        : role === "rigger"
+          ? input.workerRecommendations.riggers
+          : input.workerRecommendations.shipwrights;
+
+    return uniqueWorkerOptions([...fromAssignments, ...fromRecommendations, fallbackLabel]);
+  }
+
+  function roleSuggestion(
+    role: "technician" | "rigger" | "shipwright",
+    currentLabel: string,
+  ): string {
+    const candidates =
+      role === "technician"
+        ? uniqueWorkerOptions(input.workerRecommendations.technicians)
+        : role === "rigger"
+          ? uniqueWorkerOptions(input.workerRecommendations.riggers)
+          : uniqueWorkerOptions(input.workerRecommendations.shipwrights);
+    if (candidates.length === 0) {
+      return normalizeUnassignedLabel(currentLabel);
+    }
+
+    const usage = new Map<string, number>();
+    for (const assignment of editableAssignments) {
+      const label = normalizeWorkerOption(
+        role === "technician"
+          ? assignment.technician
+          : role === "rigger"
+            ? assignment.rigger
+            : assignment.shipwright,
+      );
+      if (!label) {
+        continue;
+      }
+      usage.set(label, (usage.get(label) ?? 0) + 1);
+    }
+
+    const normalizedCurrent = normalizeWorkerOption(currentLabel);
+    let best = candidates[0];
+    let bestLoad = Number.POSITIVE_INFINITY;
+    for (const candidate of candidates) {
+      const normalized = normalizeWorkerOption(candidate);
+      const load = usage.get(normalized) ?? 0;
+      if (load < bestLoad) {
+        best = candidate;
+        bestLoad = load;
+        continue;
+      }
+      if (load === bestLoad && normalized === normalizedCurrent) {
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  function applyAssignmentOverride(
+    assignment: DailyApprovalData["assignments"][number],
+    index: number,
+  ) {
+    const key = getAssignmentKey(assignment.vessel, index);
+    const draft = getDraftForAssignment(assignment, key);
+    const payload = {
+      vessel: assignment.vessel,
+      technician: normalizeUnassignedLabel(draft.technician),
+      rigger: normalizeUnassignedLabel(draft.rigger),
+      shipwright: normalizeUnassignedLabel(draft.shipwright),
+    };
+
+    const saved = input.onApplyAssignmentOverride(payload);
+    if (!saved) {
+      setAssignmentMessage(`Could not save ${assignment.vessel}.`);
+      return;
+    }
+
+    setEditableAssignments((current) =>
+      current.map((row, rowIndex) => (rowIndex === index ? { ...row, ...payload } : row)),
+    );
+    setAssignmentMessage(`Saved ${assignment.vessel}.`);
+  }
+
+  return (
+    <div className={styles.overlayRoot} role="dialog" aria-modal="true" aria-label="Daily scheduling approval">
+      <button
+        type="button"
+        className={styles.overlayScrim}
+        onClick={input.onClose}
+        aria-label="Close scheduling approval"
+      />
+      <section className={styles.overlayPanel}>
+        <header className={styles.overlayHeader}>
+          <div>
+            <h2 className={styles.sectionTitle}>Scheduling Approval Required</h2>
+            <p className={styles.sectionHint}>
+              {input.dailyApproval.dateLabel}: {input.dailyApproval.demandBoats} vessels planned.
+              Review assignments and approve workforce call-ins before execution.
+            </p>
+          </div>
+          <button type="button" className={styles.overlayCloseButton} onClick={input.onClose}>
+            Close
+          </button>
+        </header>
+
+        <div className={styles.tabGroup}>
+          <button
+            type="button"
+            className={tab === "summary" ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
+            onClick={() => setTab("summary")}
+          >
+            Summary
+          </button>
+          <button
+            type="button"
+            className={tab === "workforce" ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
+            onClick={() => setTab("workforce")}
+          >
+            Workforce Suggestions
+          </button>
+        </div>
+
+        {tab === "summary" ? (
+          <div className={styles.stackList}>
+            <article className={styles.miniRow}>
+              <p className={styles.rowMain}>
+                {editableAssignments.length} active vessel assignments ready for dispatch.
+              </p>
+              <p className={styles.rowMeta}>
+                Click Workforce Suggestions to approve who should be called in where shortages exist.
+              </p>
+            </article>
+            {assignmentMessage ? <p className={styles.rowMeta}>{assignmentMessage}</p> : null}
+            {editableAssignments.slice(0, 12).map((item, index) => {
+              const key = getAssignmentKey(item.vessel, index);
+              const draft = getDraftForAssignment(item, key);
+              const expanded = expandedAssignmentKey === key;
+              const techSuggestion = roleSuggestion("technician", draft.technician);
+              const riggerSuggestion = roleSuggestion("rigger", draft.rigger);
+              const shipwrightSuggestion = roleSuggestion("shipwright", draft.shipwright);
+              const technicianOptions = roleOptions("technician", draft.technician);
+              const riggerOptions = roleOptions("rigger", draft.rigger);
+              const shipwrightOptions = roleOptions("shipwright", draft.shipwright);
+
+              return (
+                <article key={`approval-assignment-${item.vessel}-${index}`} className={styles.stackListCompact}>
+                  <div className={styles.miniRow}>
+                    <div className={styles.teamMemberMain}>
+                      <p className={styles.rowMain}>{item.vessel}</p>
+                      <p className={styles.rowMeta}>
+                        Tech: {draft.technician} | Rigger: {draft.rigger} | Shipwright: {draft.shipwright}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className={styles.ghostButton}
+                      onClick={() =>
+                        setExpandedAssignmentKey((current) => (current === key ? null : key))
+                      }
+                    >
+                      {expanded ? "Close" : "Edit"}
+                    </button>
+                  </div>
+
+                  {expanded ? (
+                    <div className={styles.teamInlineForm}>
+                      <label className={styles.overlayField}>
+                        <span>Technician</span>
+                        <select
+                          className={styles.overlayInput}
+                          value={draft.technician}
+                          onChange={(event) =>
+                            updateDraftAssignment(key, "technician", event.target.value)
+                          }
+                        >
+                          {technicianOptions.map((option) => (
+                            <option key={`approval-tech-${item.vessel}-${option}`} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className={styles.overlayField}>
+                        <span>Rigger</span>
+                        <select
+                          className={styles.overlayInput}
+                          value={draft.rigger}
+                          onChange={(event) =>
+                            updateDraftAssignment(key, "rigger", event.target.value)
+                          }
+                        >
+                          {riggerOptions.map((option) => (
+                            <option key={`approval-rigger-${item.vessel}-${option}`} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className={styles.overlayField}>
+                        <span>Shipwright</span>
+                        <select
+                          className={styles.overlayInput}
+                          value={draft.shipwright}
+                          onChange={(event) =>
+                            updateDraftAssignment(key, "shipwright", event.target.value)
+                          }
+                        >
+                          {shipwrightOptions.map((option) => (
+                            <option key={`approval-shipwright-${item.vessel}-${option}`} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className={styles.overlayField}>
+                        <span>Suggestions</span>
+                        <div className={styles.teamDayPills}>
+                          <button
+                            type="button"
+                            className={styles.dayPill}
+                            onClick={() =>
+                              updateDraftAssignment(key, "technician", techSuggestion)
+                            }
+                          >
+                            Tech: {techSuggestion}
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.dayPill}
+                            onClick={() =>
+                              updateDraftAssignment(key, "rigger", riggerSuggestion)
+                            }
+                          >
+                            Rigger: {riggerSuggestion}
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.dayPill}
+                            onClick={() =>
+                              updateDraftAssignment(key, "shipwright", shipwrightSuggestion)
+                            }
+                          >
+                            Shipwright: {shipwrightSuggestion}
+                          </button>
+                        </div>
+                      </div>
+                      <div className={styles.overlayActions}>
+                        <button
+                          type="button"
+                          className={styles.ghostButton}
+                          onClick={() => {
+                            updateDraftAssignment(key, "technician", techSuggestion);
+                            updateDraftAssignment(key, "rigger", riggerSuggestion);
+                            updateDraftAssignment(key, "shipwright", shipwrightSuggestion);
+                          }}
+                        >
+                          Use Suggestions
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.primaryButton}
+                          onClick={() => applyAssignmentOverride(item, index)}
+                        >
+                          Apply ✓
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <div className={styles.stackList}>
+            {input.dailyApproval.shortages.length > 0 ? (
+              input.dailyApproval.shortages.map((shortage) => (
+                <article key={`approval-shortage-${shortage.roleKey}`} className={styles.miniRow}>
+                  <p className={styles.rowMain}>
+                    Need {shortage.neededWorkers} {shortage.roleLabel.toLowerCase()}
+                    {shortage.neededWorkers === 1 ? "" : "s"} for today.
+                  </p>
+                  <p className={styles.rowMeta}>
+                    Select who to call in. All team members are eligible, with off-duty members listed first.
+                  </p>
+                  <div className={styles.teamDayPills}>
+                    {shortage.candidateWorkers.map((workerLabel) => {
+                      const selected = (input.selections[shortage.roleKey] ?? []).includes(workerLabel);
+                      return (
+                        <button
+                          key={`approval-worker-${shortage.roleKey}-${workerLabel}`}
+                          type="button"
+                          className={
+                            selected
+                              ? `${styles.dayPill} ${styles.dayPillActive}`
+                              : styles.dayPill
+                          }
+                          onClick={() => toggleWorker(shortage.roleKey, workerLabel)}
+                        >
+                          {workerLabel}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className={styles.rowMeta}>
+                    Selected: {(input.selections[shortage.roleKey] ?? []).length} / {shortage.neededWorkers}
+                  </p>
+                </article>
+              ))
+            ) : (
+              <article className={styles.miniRow}>
+                <p className={styles.rowMain}>No shortages detected for today.</p>
+                <p className={styles.rowMeta}>You can approve the plan as-is.</p>
+              </article>
+            )}
+          </div>
+        )}
+
+        <div className={styles.overlayActions}>
+          <button type="button" className={styles.ghostButton} onClick={input.onDecline} disabled={input.busy}>
+            Decline And Edit Schedule
+          </button>
+          <button type="button" className={styles.primaryButton} onClick={input.onApprove} disabled={input.busy}>
+            {input.busy ? "Saving Approval..." : "Approve Scheduling"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function AddVesselDialog(input: {

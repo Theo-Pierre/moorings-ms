@@ -19,6 +19,7 @@ export interface TeamOverrideRecord {
   previousRole: TeamRoleKey | null;
   previousLabel: string;
   daysOff: string[];
+  backAtWorkDateIso: string | null;
   createdAtMs: number;
   createdBy: string;
 }
@@ -38,6 +39,7 @@ interface NormalizedOverridePayload {
   previousRole: TeamRoleKey | null;
   previousLabel: string;
   daysOff: string[];
+  backAtWorkDateIso: string | null;
   createdBy: string;
 }
 
@@ -69,6 +71,7 @@ export async function addTeamOverride(input: {
   previousRole?: TeamRoleKey | null;
   previousLabel?: string;
   daysOff: string[];
+  backAtWorkDateIso?: string | null;
   createdBy: string;
 }): Promise<TeamOverrideRecord | null> {
   const payload = normalizeOverridePayload(input);
@@ -209,6 +212,7 @@ function normalizeOverridePayload(input: {
   previousRole?: TeamRoleKey | null;
   previousLabel?: string;
   daysOff: string[];
+  backAtWorkDateIso?: string | null;
   createdBy: string;
 }): NormalizedOverridePayload | null {
   const label = input.label.trim();
@@ -224,6 +228,7 @@ function normalizeOverridePayload(input: {
     previousRole: input.previousRole ?? null,
     previousLabel: typeof input.previousLabel === "string" ? input.previousLabel.trim() : "",
     daysOff: normalizeDaysOffArray(input.daysOff),
+    backAtWorkDateIso: normalizeOptionalDateIso(input.backAtWorkDateIso),
     createdBy: input.createdBy,
   };
 }
@@ -251,6 +256,9 @@ function sanitizeRemoteRecord(id: string, value: unknown): TeamOverrideRecord | 
     previousRole: isTeamRoleKey(row.previousRole) ? row.previousRole : null,
     previousLabel: typeof row.previousLabel === "string" ? row.previousLabel.trim() : "",
     daysOff: normalizeDaysOffArray(row.daysOff),
+    backAtWorkDateIso: normalizeOptionalDateIso(
+      (row as Partial<{ backAtWorkDateIso: unknown }>).backAtWorkDateIso,
+    ),
     createdAtMs: toMillis(row.createdAtMs ?? row.createdAt),
     createdBy: typeof row.createdBy === "string" ? row.createdBy : "",
   };
@@ -355,6 +363,9 @@ function sanitizeFallbackRecord(value: unknown): TeamOverrideRecord | null {
     previousRole: isTeamRoleKey(row.previousRole) ? row.previousRole : null,
     previousLabel: typeof row.previousLabel === "string" ? row.previousLabel.trim() : "",
     daysOff: normalizeDaysOffArray(row.daysOff),
+    backAtWorkDateIso: normalizeOptionalDateIso(
+      (row as Partial<{ backAtWorkDateIso: unknown }>).backAtWorkDateIso,
+    ),
     createdAtMs:
       typeof row.createdAtMs === "number" && Number.isFinite(row.createdAtMs)
         ? row.createdAtMs
@@ -389,6 +400,17 @@ function normalizePositionLabel(value: unknown, role: TeamRoleKey): string {
     return "Shipwright";
   }
   return "AC Tech";
+}
+
+function normalizeOptionalDateIso(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
 }
 
 function clampMs(value: number, min: number, max: number): number {

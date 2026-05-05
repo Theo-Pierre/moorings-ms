@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 
 import { getSession } from "@/lib/auth";
 import { invalidateOperationsDashboardCache } from "@/lib/operations-data";
-import { listCompletedTaskIds, setTaskCompletion } from "@/lib/schedule-task-state";
+import {
+  listCanonicalTaskCompletions,
+  listTaskCompletions,
+  setTaskCompletion,
+} from "@/lib/schedule-task-state";
 
 export const dynamic = "force-dynamic";
 
@@ -17,12 +21,19 @@ export async function GET(request: Request) {
   if (!reportDateIso) {
     return NextResponse.json({ error: "date query parameter must be YYYY-MM-DD." }, { status: 400 });
   }
+  const dueDates = normalizeDueDates(url.searchParams.get("dueDates") ?? "");
 
-  const doneTaskIds = await listCompletedTaskIds(reportDateIso);
+  const [completions, canonicalCompletions] = await Promise.all([
+    listTaskCompletions(reportDateIso),
+    listCanonicalTaskCompletions(dueDates.length > 0 ? dueDates : [reportDateIso]),
+  ]);
+  const doneTaskIds = Object.keys(completions);
   return NextResponse.json({
     ok: true,
     reportDateIso,
     doneTaskIds,
+    completions,
+    canonicalCompletions,
   });
 }
 
@@ -43,6 +54,10 @@ export async function POST(request: Request) {
     reportDateIso: string;
     taskId: string;
     done: boolean;
+    completedBy: string;
+    completedAtIso: string;
+    note: string;
+    preCompleted: boolean;
   }>;
 
   const reportDateIso = normalizeReportDate(payload.reportDateIso ?? "");
@@ -62,6 +77,10 @@ export async function POST(request: Request) {
     taskId,
     done: payload.done,
     updatedBy: session.email,
+    completedBy: typeof payload.completedBy === "string" ? payload.completedBy : session.name,
+    completedAtIso: typeof payload.completedAtIso === "string" ? payload.completedAtIso : undefined,
+    note: typeof payload.note === "string" ? payload.note : undefined,
+    preCompleted: typeof payload.preCompleted === "boolean" ? payload.preCompleted : undefined,
   });
   if (!saved) {
     return NextResponse.json({ error: "Could not update shared task state." }, { status: 500 });
@@ -74,6 +93,11 @@ export async function POST(request: Request) {
     reportDateIso,
     taskId,
     done: payload.done,
+    completedBy: typeof payload.completedBy === "string" ? payload.completedBy : session.name,
+    completedAtIso:
+      typeof payload.completedAtIso === "string"
+        ? payload.completedAtIso
+        : new Date().toISOString(),
   });
 }
 
@@ -91,4 +115,11 @@ function normalizeTaskId(value: string): string {
     return "";
   }
   return trimmed;
+}
+
+function normalizeDueDates(raw: string): string[] {
+  return [...new Set(raw
+    .split(",")
+    .map((value) => normalizeReportDate(value))
+    .filter(Boolean))];
 }

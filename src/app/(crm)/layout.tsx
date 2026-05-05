@@ -21,6 +21,7 @@ export default async function CrmLayout({ children }: { children: React.ReactNod
       planningDateOverride={data.planningDateOverride}
       session={session}
       workerRecommendations={workerRecommendations}
+      dailyApproval={data.dailyApproval}
     >
       {children}
     </CrmShell>

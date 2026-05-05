@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import type {
   AssignmentPlanItem,
@@ -11,10 +11,15 @@ import type {
 
 import {
   applyVesselOverridesToAssignmentRows,
+  clearAllVesselOverrides,
+  getVesselOverrideSnapshot,
+  removeVesselOverride,
+  upsertVesselOverride,
   useManualAssignmentRows,
   useVesselOverrides,
 } from "./manual-vessels";
 import { useSharedTaskState } from "./shared-task-state";
+import { pushUndoAction } from "./undo-stack";
 import styles from "./crm.module.css";
 
 type TaskFilter = "all" | "open" | "done";
@@ -24,29 +29,63 @@ const PAGE_SIZE = 5;
 
 interface SchedulePageProps {
   data: OperationsDashboardData;
+  viewer: {
+    name: string;
+    email: string;
+    role: "viewer" | "admin" | "super-admin";
+  };
 }
 
-export function SchedulePage({ data }: SchedulePageProps) {
+interface CompletionDialogState {
+  taskId: string;
+  boatName: string;
+  completedBy: string;
+  completedAtLocal: string;
+  note: string;
+  preCompleted: boolean;
+}
+
+export function SchedulePage({ data, viewer }: SchedulePageProps) {
   const searchParams = useSearchParams();
+  const router = useRouter();
+
   const manualAssignmentRows = useManualAssignmentRows();
   const vesselOverrides = useVesselOverrides();
   const assignmentRows = useMemo(
-    () => applyVesselOverridesToAssignmentRows([...manualAssignmentRows, ...data.assignmentPlan], vesselOverrides),
+    () =>
+      applyVesselOverridesToAssignmentRows(
+        [...manualAssignmentRows, ...data.assignmentPlan],
+        vesselOverrides,
+      ),
     [manualAssignmentRows, data.assignmentPlan, vesselOverrides],
   );
+
   const requestedView = parseDayView(searchParams.get("view"));
   const [query, setQuery] = useState("");
   const [searchScope, setSearchScope] = useState<SearchScope>("all");
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   const [dayView, setDayView] = useState<DayView>(requestedView);
   const [taskFilter, setTaskFilter] = useState<TaskFilter>("all");
-  const { taskState, setTaskDone, pendingTaskIds } = useSharedTaskState(
-    data.reportDateIso,
-    assignmentRows,
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [refreshingScheduling, setRefreshingScheduling] = useState(false);
+  const [refreshDialogOpen, setRefreshDialogOpen] = useState(false);
+  const [allowOverrideRebalance, setAllowOverrideRebalance] = useState(false);
+  const [completionDialog, setCompletionDialog] = useState<CompletionDialogState | null>(null);
+  const [editingRow, setEditingRow] = useState<AssignmentPlanItem | null>(null);
+  const [savingBulkDone, setSavingBulkDone] = useState(false);
+
+  const {
+    taskState,
+    taskMeta,
+    setTaskDone,
+    pendingTaskIds,
+    refreshTaskState,
+  } = useSharedTaskState(data.reportDateIso, assignmentRows);
+
+  const nextWeekEndIso = useMemo(
+    () => toIsoDate(addDays(parseIsoDate(data.reportDateIso), 7)),
+    [data.reportDateIso],
   );
-  const nextWeekEndIso = useMemo(() => toIsoDate(addDays(parseIsoDate(data.reportDateIso), 7)), [
-    data.reportDateIso,
-  ]);
   const nextOperationalIso = useMemo(
     () => toIsoDate(addDays(parseIsoDate(data.reportDateIso), 1)),
     [data.reportDateIso],
@@ -80,7 +119,12 @@ export function SchedulePage({ data }: SchedulePageProps) {
     [assignmentRows, completedYesterdayBoatKeys],
   );
 
-  const effectiveExecutionRows = executionRows;
+  const effectiveExecutionRows = useMemo(() => dedupeAssignmentRows(executionRows), [executionRows]);
+
+  const rowById = useMemo(
+    () => new Map(effectiveExecutionRows.map((item) => [item.id, item])),
+    [effectiveExecutionRows],
+  );
 
   const rows = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -88,19 +132,31 @@ export function SchedulePage({ data }: SchedulePageProps) {
     return effectiveExecutionRows.filter((item) => {
       const isDone = Boolean(taskState[item.id]);
 
-      if (dayView === "yesterday" && !(item.dueDate < data.reportDateIso || item.source === "Yesterday")) {
+      if (
+        dayView === "yesterday" &&
+        !(item.source === "Yesterday" && item.dueDate < data.reportDateIso)
+      ) {
         return false;
       }
       if (dayView === "today" && item.dueDate !== data.reportDateIso) {
-        return false;
+        if (!(item.source === "Carryover" && item.dueDate <= data.reportDateIso)) {
+          return false;
+        }
       }
       if (dayView === "tomorrow" && item.dueDate !== nextOperationalIso) {
         return false;
       }
-      if (dayView === "nextWeek" && !(item.dueDate > data.reportDateIso && item.dueDate <= nextWeekEndIso)) {
+      if (
+        dayView === "nextWeek" &&
+        !(item.dueDate > data.reportDateIso && item.dueDate <= nextWeekEndIso)
+      ) {
         return false;
       }
-      if (dayView === "all" && item.dueDate < data.reportDateIso) {
+      if (
+        dayView === "all" &&
+        item.dueDate < data.reportDateIso &&
+        item.source !== "Carryover"
+      ) {
         return false;
       }
 
@@ -137,7 +193,17 @@ export function SchedulePage({ data }: SchedulePageProps) {
 
       return inVessel || inTechnician || inRigger || inShipwright;
     });
-  }, [data.reportDateIso, dayView, effectiveExecutionRows, nextOperationalIso, nextWeekEndIso, query, searchScope, taskFilter, taskState]);
+  }, [
+    data.reportDateIso,
+    dayView,
+    effectiveExecutionRows,
+    nextOperationalIso,
+    nextWeekEndIso,
+    query,
+    searchScope,
+    taskFilter,
+    taskState,
+  ]);
 
   const searchSuggestions = useMemo(() => {
     const values =
@@ -156,15 +222,50 @@ export function SchedulePage({ data }: SchedulePageProps) {
                   item.rigger.workerLabel,
                   item.shipwright.workerLabel,
                 ]);
-    return [...new Set(values.filter(Boolean))].sort((left, right) => left.localeCompare(right)).slice(0, 200);
+
+    return [...new Set(values.filter(Boolean))]
+      .sort((left, right) => left.localeCompare(right))
+      .slice(0, 200);
   }, [effectiveExecutionRows, searchScope]);
 
-  const orderedRows = useMemo(
-    () => [...rows].sort(compareTimelineRows),
-    [rows],
+  const orderedRows = useMemo(() => [...rows].sort(compareTimelineRows), [rows]);
+  const technicianOptions = useMemo(
+    () =>
+      uniqueSorted([
+        ...data.teamRoster.members
+          .filter((member) => member.roleKey === "technicians")
+          .map((member) => member.label),
+        editingRow?.technician.workerLabel ?? "",
+      ]),
+    [data.teamRoster.members, editingRow?.technician.workerLabel],
+  );
+  const riggerOptions = useMemo(
+    () =>
+      uniqueSorted([
+        ...data.teamRoster.members
+          .filter((member) => member.roleKey === "riggers")
+          .map((member) => member.label),
+        editingRow?.rigger.workerLabel ?? "",
+      ]),
+    [data.teamRoster.members, editingRow?.rigger.workerLabel],
+  );
+  const shipwrightOptions = useMemo(
+    () =>
+      uniqueSorted([
+        ...data.teamRoster.members
+          .filter((member) => member.roleKey === "shipwrights")
+          .map((member) => member.label),
+        editingRow?.shipwright.workerLabel ?? "",
+      ]),
+    [data.teamRoster.members, editingRow?.shipwright.workerLabel],
   );
   const todayRows = useMemo(
-    () => orderedRows.filter((item) => item.dueDate === data.reportDateIso),
+    () =>
+      orderedRows.filter(
+        (item) =>
+          item.dueDate === data.reportDateIso ||
+          (item.source === "Carryover" && item.dueDate <= data.reportDateIso),
+      ),
     [data.reportDateIso, orderedRows],
   );
   const tomorrowRows = useMemo(
@@ -172,9 +273,13 @@ export function SchedulePage({ data }: SchedulePageProps) {
     [nextOperationalIso, orderedRows],
   );
   const yesterdayRows = useMemo(
-    () => orderedRows.filter((item) => item.dueDate < data.reportDateIso || item.source === "Yesterday"),
+    () =>
+      orderedRows.filter(
+        (item) => item.source === "Yesterday" && item.dueDate < data.reportDateIso,
+      ),
     [data.reportDateIso, orderedRows],
   );
+
   const upcomingDateGroups = useMemo(() => {
     const grouped = new Map<string, AssignmentPlanItem[]>();
     for (const row of orderedRows) {
@@ -197,9 +302,291 @@ export function SchedulePage({ data }: SchedulePageProps) {
   );
   const openTaskCount = Math.max(0, totalTaskCount - completedTaskCount);
 
-  function toggleTask(id: string) {
+  async function toggleTask(id: string) {
     const nextDone = !Boolean(taskState[id]);
-    void setTaskDone(id, nextDone);
+    if (!nextDone) {
+      const previousMeta = taskMeta[id];
+      await setTaskDone(id, false);
+      pushUndoAction({
+        type: "task-completion",
+        reportDateIso: data.reportDateIso,
+        taskId: id,
+        previousDone: true,
+        previousMeta: toUndoCompletionMeta(previousMeta),
+        nextDone: false,
+        nextMeta: null,
+        createdAtIso: new Date().toISOString(),
+      });
+      return;
+    }
+
+    const row = rowById.get(id);
+    if (!row) {
+      const completionMeta = {
+        completedBy: viewer.name || viewer.email,
+        completedAtIso: new Date().toISOString(),
+        note: "",
+        preCompleted: false,
+      };
+      await setTaskDone(id, true, {
+        completedBy: completionMeta.completedBy,
+        completedAtIso: completionMeta.completedAtIso,
+      });
+      pushUndoAction({
+        type: "task-completion",
+        reportDateIso: data.reportDateIso,
+        taskId: id,
+        previousDone: false,
+        previousMeta: null,
+        nextDone: true,
+        nextMeta: completionMeta,
+        createdAtIso: new Date().toISOString(),
+      });
+      return;
+    }
+
+    setCompletionDialog({
+      taskId: id,
+      boatName: row.boatName,
+      completedBy: viewer.name || viewer.email,
+      completedAtLocal: toLocalDateTimeInput(new Date()),
+      note: "",
+      preCompleted: row.dueDate > data.reportDateIso,
+    });
+  }
+
+  async function saveCompletionDialog(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!completionDialog) {
+      return;
+    }
+    const previousDone = Boolean(taskState[completionDialog.taskId]);
+    const previousMeta = taskMeta[completionDialog.taskId];
+
+    const completedAtIso =
+      localDateTimeInputToIso(completionDialog.completedAtLocal) || new Date().toISOString();
+    const nextMeta = {
+      completedBy: completionDialog.completedBy,
+      completedAtIso,
+      note: completionDialog.note,
+      preCompleted: completionDialog.preCompleted,
+    };
+
+    await setTaskDone(completionDialog.taskId, true, {
+      completedBy: nextMeta.completedBy,
+      completedAtIso: nextMeta.completedAtIso,
+      note: nextMeta.note,
+      preCompleted: nextMeta.preCompleted,
+    });
+    pushUndoAction({
+      type: "task-completion",
+      reportDateIso: data.reportDateIso,
+      taskId: completionDialog.taskId,
+      previousDone,
+      previousMeta: toUndoCompletionMeta(previousMeta),
+      nextDone: true,
+      nextMeta,
+      createdAtIso: new Date().toISOString(),
+    });
+    setCompletionDialog(null);
+  }
+
+  async function markAllDone(rowsForLane: AssignmentPlanItem[], laneTitle: string) {
+    if (savingBulkDone) {
+      return;
+    }
+    const openRows = rowsForLane.filter((row) => !taskState[row.id]);
+    if (openRows.length === 0) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Mark all ${openRows.length} open vessel tasks in ${laneTitle} as done?`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setSavingBulkDone(true);
+    try {
+      for (const row of openRows) {
+        const previousDone = Boolean(taskState[row.id]);
+        const previousMeta = taskMeta[row.id];
+        const nextMeta = {
+          completedBy: viewer.name || viewer.email,
+          completedAtIso: new Date().toISOString(),
+          note: `Bulk completion from ${laneTitle}.`,
+          preCompleted: row.dueDate > data.reportDateIso,
+        };
+        await setTaskDone(row.id, true, {
+          completedBy: nextMeta.completedBy,
+          completedAtIso: nextMeta.completedAtIso,
+          note: nextMeta.note,
+          preCompleted: nextMeta.preCompleted,
+        });
+        pushUndoAction({
+          type: "task-completion",
+          reportDateIso: data.reportDateIso,
+          taskId: row.id,
+          previousDone,
+          previousMeta: toUndoCompletionMeta(previousMeta),
+          nextDone: true,
+          nextMeta,
+          createdAtIso: new Date().toISOString(),
+        });
+      }
+    } finally {
+      setSavingBulkDone(false);
+    }
+  }
+
+  const refreshPreview = useMemo(() => {
+    const todayOpen = todayRows.filter((row) => !taskState[row.id]).length;
+    const tomorrowOpen = tomorrowRows.filter((row) => !taskState[row.id]).length;
+    const nextWeekOpen = upcomingDateGroups.reduce(
+      (sum, group) => sum + group.items.filter((row) => !taskState[row.id]).length,
+      0,
+    );
+    const shortAssignments = todayRows.reduce((sum, row) => {
+      const missing =
+        Number(row.technician.assignmentState === "Unassigned") +
+        Number(row.rigger.assignmentState === "Unassigned") +
+        Number(row.shipwright.assignmentState === "Unassigned");
+      return sum + missing;
+    }, 0);
+    return {
+      todayOpen,
+      tomorrowOpen,
+      nextWeekOpen,
+      shortAssignments,
+    };
+  }, [taskState, todayRows, tomorrowRows, upcomingDateGroups]);
+
+  async function refreshSchedulingPlan(options?: { allowOverrideRebalance?: boolean }) {
+    if (viewer.role !== "super-admin" || refreshingScheduling) {
+      return;
+    }
+
+    setRefreshingScheduling(true);
+    setSaveMessage(null);
+
+    try {
+      if (options?.allowOverrideRebalance) {
+        clearAllVesselOverrides();
+      }
+      const response = await fetch("/api/scheduling-refresh", {
+        method: "POST",
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error || "Could not refresh scheduling.");
+      }
+
+      router.refresh();
+      await refreshTaskState();
+      setRefreshDialogOpen(false);
+      setSaveMessage("Scheduling refreshed for today, tomorrow, and next week.");
+    } catch (error) {
+      setSaveMessage(error instanceof Error ? error.message : "Could not refresh scheduling.");
+    } finally {
+      setRefreshingScheduling(false);
+    }
+  }
+
+  function openEditPanel(item: AssignmentPlanItem) {
+    setEditingRow(item);
+    setSaveMessage(null);
+  }
+
+  function saveEditedVessel(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingRow) {
+      return;
+    }
+
+    const form = new FormData(event.currentTarget);
+    const completion = Number(form.get("completionPct") ?? editingRow.completionPct);
+    const boatKey = editingRow.boatName;
+    const previous = getVesselOverrideSnapshot(boatKey);
+
+    const next = upsertVesselOverride({
+      boatKey: editingRow.boatName,
+      boatName: String(form.get("boatName") ?? editingRow.boatName),
+      stat: String(form.get("stat") ?? editingRow.stat),
+      dueDate: String(form.get("dueDate") ?? editingRow.dueDate),
+      completionPct: Number.isFinite(completion) ? completion : editingRow.completionPct,
+      assignedTechnician: String(
+        form.get("assignedTechnician") ?? editingRow.technician.workerLabel,
+      ),
+      assignedRigger: String(form.get("assignedRigger") ?? editingRow.rigger.workerLabel),
+      assignedShipwright: String(
+        form.get("assignedShipwright") ?? editingRow.shipwright.workerLabel,
+      ),
+      note: String(form.get("note") ?? editingRow.rationale),
+      deleted: false,
+    });
+    pushUndoAction({
+      type: "vessel-override",
+      boatKey,
+      previous,
+      next,
+      createdAtIso: new Date().toISOString(),
+    });
+
+    setSaveMessage(`Updated ${editingRow.boatName}.`);
+    setEditingRow(null);
+  }
+
+  function deleteEditedVessel() {
+    if (!editingRow) {
+      return;
+    }
+    const boatKey = editingRow.boatName;
+    const previous = getVesselOverrideSnapshot(boatKey);
+
+    const next = upsertVesselOverride({
+      boatKey: editingRow.boatName,
+      deleted: true,
+    });
+    pushUndoAction({
+      type: "vessel-override",
+      boatKey,
+      previous,
+      next,
+      createdAtIso: new Date().toISOString(),
+    });
+
+    setSaveMessage(`Removed ${editingRow.boatName} from active planning view.`);
+    setEditingRow(null);
+  }
+
+  function resetEditedVessel() {
+    if (!editingRow) {
+      return;
+    }
+    const boatKey = editingRow.boatName;
+    const previous = getVesselOverrideSnapshot(boatKey);
+    removeVesselOverride(editingRow.boatName);
+    pushUndoAction({
+      type: "vessel-override",
+      boatKey,
+      previous,
+      next: null,
+      createdAtIso: new Date().toISOString(),
+    });
+    setSaveMessage(`Reset override for ${editingRow.boatName}.`);
+    setEditingRow(null);
+  }
+
+  function handleShortageAction(role: "technician" | "rigger" | "shipwright") {
+    if (viewer.role === "super-admin") {
+      router.push(`/team-control?add=${encodeURIComponent(role)}`);
+      return;
+    }
+
+    setSaveMessage(
+      `Shortage detected for ${role}. Ask a Super Admin to add a temporary team member in Team Control.`,
+    );
   }
 
   return (
@@ -208,8 +595,8 @@ export function SchedulePage({ data }: SchedulePageProps) {
         <div>
           <h1 className={styles.pageTitle}>Execution Task Hub: Current + Next Day</h1>
           <p className={styles.pageSubtitle}>
-            Every scheduled vessel is a task. Tick tasks as work is completed to keep dispatch, quality, and daily
-            turnaround execution aligned.
+            Every scheduled vessel is a task. Tick tasks as work is completed to keep dispatch,
+            quality, and daily turnaround execution aligned.
           </p>
         </div>
       </section>
@@ -242,39 +629,71 @@ export function SchedulePage({ data }: SchedulePageProps) {
             <div className={styles.tabGroup}>
               <button
                 type="button"
-                className={dayView === "yesterday" ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
+                className={
+                  dayView === "yesterday"
+                    ? `${styles.tabButton} ${styles.tabButtonActive}`
+                    : styles.tabButton
+                }
                 onClick={() => setDayView("yesterday")}
               >
                 Yesterday
               </button>
               <button
                 type="button"
-                className={dayView === "today" ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
+                className={
+                  dayView === "today"
+                    ? `${styles.tabButton} ${styles.tabButtonActive}`
+                    : styles.tabButton
+                }
                 onClick={() => setDayView("today")}
               >
                 Today
               </button>
               <button
                 type="button"
-                className={dayView === "tomorrow" ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
+                className={
+                  dayView === "tomorrow"
+                    ? `${styles.tabButton} ${styles.tabButtonActive}`
+                    : styles.tabButton
+                }
                 onClick={() => setDayView("tomorrow")}
               >
                 Tomorrow
               </button>
               <button
                 type="button"
-                className={dayView === "nextWeek" ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
+                className={
+                  dayView === "nextWeek"
+                    ? `${styles.tabButton} ${styles.tabButtonActive}`
+                    : styles.tabButton
+                }
                 onClick={() => setDayView("nextWeek")}
               >
                 Next Week
               </button>
               <button
                 type="button"
-                className={dayView === "all" ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
+                className={
+                  dayView === "all"
+                    ? `${styles.tabButton} ${styles.tabButtonActive}`
+                    : styles.tabButton
+                }
                 onClick={() => setDayView("all")}
               >
                 All
               </button>
+              {viewer.role === "super-admin" ? (
+                <button
+                  type="button"
+                  className={styles.ghostButton}
+                  onClick={() => {
+                    setRefreshDialogOpen(true);
+                  }}
+                  disabled={refreshingScheduling}
+                >
+                  {refreshingScheduling ? "Refreshing..." : "Refresh Scheduling"}
+                </button>
+              ) : null}
             </div>
           </div>
 
@@ -284,7 +703,11 @@ export function SchedulePage({ data }: SchedulePageProps) {
               <input
                 type="search"
                 className={styles.searchInput}
-                placeholder={`Search ${searchScope === "all" ? "vessel, technician, rigger, shipwright" : searchScope}`}
+                placeholder={`Search ${
+                  searchScope === "all"
+                    ? "vessel, technician, rigger, shipwright"
+                    : searchScope
+                }`}
                 value={query}
                 list="schedule-search-suggestions"
                 onChange={(event) => {
@@ -311,12 +734,22 @@ export function SchedulePage({ data }: SchedulePageProps) {
               </button>
               {scopeMenuOpen ? (
                 <div className={styles.filterMenu} role="menu" aria-label="Search scope options">
-                  {( ["all", "vessel", "technician", "rigger", "shipwright"] as SearchScope[]).map((scope) => (
+                  {([
+                    "all",
+                    "vessel",
+                    "technician",
+                    "rigger",
+                    "shipwright",
+                  ] as SearchScope[]).map((scope) => (
                     <button
                       key={`scope-${scope}`}
                       type="button"
                       role="menuitem"
-                      className={scope === searchScope ? `${styles.filterMenuItem} ${styles.filterMenuItemActive}` : styles.filterMenuItem}
+                      className={
+                        scope === searchScope
+                          ? `${styles.filterMenuItem} ${styles.filterMenuItemActive}`
+                          : styles.filterMenuItem
+                      }
                       onClick={() => {
                         setSearchScope(scope);
                         setScopeMenuOpen(false);
@@ -346,6 +779,8 @@ export function SchedulePage({ data }: SchedulePageProps) {
           </div>
         </div>
 
+        {saveMessage ? <p className={styles.sectionHint}>{saveMessage}</p> : null}
+
         <div className={styles.timelineStack}>
           {dayView === "yesterday" ? (
             <TimelineLane
@@ -354,49 +789,77 @@ export function SchedulePage({ data }: SchedulePageProps) {
               rows={yesterdayRows}
               reportDateIso={data.reportDateIso}
               taskState={taskState}
+              taskMeta={taskMeta}
               pendingTaskIds={pendingTaskIds}
               onToggleTask={toggleTask}
+              onDoneAll={(laneRows) => {
+                void markAllDone(laneRows, "Yesterday");
+              }}
+              onEditVessel={openEditPanel}
+              onOpenShortageAction={handleShortageAction}
+              canManageTeam={viewer.role === "super-admin"}
             />
           ) : null}
 
-          {(dayView === "all" || dayView === "today") ? (
+          {dayView === "all" || dayView === "today" ? (
             <TimelineLane
               title="Today (Primary Focus)"
               subtitle={`${todayRows.length} vessels scheduled for ${formatDateLabel(data.reportDateIso)}`}
               rows={todayRows}
               reportDateIso={data.reportDateIso}
               taskState={taskState}
+              taskMeta={taskMeta}
               pendingTaskIds={pendingTaskIds}
               onToggleTask={toggleTask}
+              onDoneAll={(laneRows) => {
+                void markAllDone(laneRows, "Today");
+              }}
+              onEditVessel={openEditPanel}
+              onOpenShortageAction={handleShortageAction}
+              canManageTeam={viewer.role === "super-admin"}
             />
           ) : null}
 
-          {(dayView === "all" || dayView === "tomorrow") ? (
+          {dayView === "all" || dayView === "tomorrow" ? (
             <TimelineLane
               title="Tomorrow"
               subtitle={`${tomorrowRows.length} vessels scheduled for ${formatDateLabel(nextOperationalIso)}`}
               rows={tomorrowRows}
               reportDateIso={data.reportDateIso}
               taskState={taskState}
+              taskMeta={taskMeta}
               pendingTaskIds={pendingTaskIds}
               onToggleTask={toggleTask}
+              onDoneAll={(laneRows) => {
+                void markAllDone(laneRows, "Tomorrow");
+              }}
+              onEditVessel={openEditPanel}
+              onOpenShortageAction={handleShortageAction}
+              canManageTeam={viewer.role === "super-admin"}
             />
           ) : null}
 
-          {(dayView === "all" || dayView === "nextWeek") ? (
-            upcomingDateGroups.map((group) => (
-              <TimelineLane
-                key={`upcoming-${group.dateIso}`}
-                title={`Upcoming: ${group.label}`}
-                subtitle={`${group.items.length} vessels in this operational block`}
-                rows={group.items}
-                reportDateIso={data.reportDateIso}
-                taskState={taskState}
-                pendingTaskIds={pendingTaskIds}
-                onToggleTask={toggleTask}
-              />
-            ))
-          ) : null}
+          {dayView === "all" || dayView === "nextWeek"
+            ? upcomingDateGroups.map((group) => (
+                <TimelineLane
+                  key={`upcoming-${group.dateIso}`}
+                  title={`Upcoming: ${group.label}`}
+                  subtitle={`${group.items.length} vessels in this operational block`}
+                  rows={group.items}
+                  reportDateIso={data.reportDateIso}
+                  taskState={taskState}
+                  taskMeta={taskMeta}
+                  pendingTaskIds={pendingTaskIds}
+                  onToggleTask={toggleTask}
+                  onDoneAll={(laneRows) => {
+                    void markAllDone(laneRows, `Upcoming ${group.label}`);
+                  }}
+                  onEditVessel={openEditPanel}
+                  onOpenShortageAction={handleShortageAction}
+                  canManageTeam={viewer.role === "super-admin"}
+                />
+              ))
+            : null}
 
           {(dayView === "all" &&
             todayRows.length === 0 &&
@@ -413,6 +876,346 @@ export function SchedulePage({ data }: SchedulePageProps) {
           ) : null}
         </div>
       </section>
+
+      {completionDialog ? (
+        <section
+          className={styles.overlayRoot}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Mark task complete"
+        >
+          <button
+            type="button"
+            className={styles.overlayScrim}
+            aria-label="Close completion dialog"
+            onClick={() => setCompletionDialog(null)}
+          />
+          <article className={styles.overlayPanel}>
+            <header className={styles.overlayHeader}>
+              <div>
+                <h3 className={styles.sectionTitle}>Mark Complete: {completionDialog.boatName}</h3>
+                <p className={styles.sectionHint}>Capture who completed this vessel and when.</p>
+              </div>
+              <button
+                type="button"
+                className={styles.overlayCloseButton}
+                onClick={() => setCompletionDialog(null)}
+              >
+                Close
+              </button>
+            </header>
+
+            <form className={styles.overlayForm} onSubmit={saveCompletionDialog}>
+              <label className={styles.overlayField}>
+                <span>Completed By</span>
+                <input
+                  className={styles.overlayInput}
+                  value={completionDialog.completedBy}
+                  onChange={(event) =>
+                    setCompletionDialog((current) =>
+                      current
+                        ? {
+                            ...current,
+                            completedBy: event.target.value,
+                          }
+                        : current,
+                    )
+                  }
+                  required
+                />
+              </label>
+
+              <label className={styles.overlayField}>
+                <span>Completed At</span>
+                <input
+                  type="datetime-local"
+                  className={styles.overlayInput}
+                  value={completionDialog.completedAtLocal}
+                  onChange={(event) =>
+                    setCompletionDialog((current) =>
+                      current
+                        ? {
+                            ...current,
+                            completedAtLocal: event.target.value,
+                          }
+                        : current,
+                    )
+                  }
+                  required
+                />
+              </label>
+
+              <label className={`${styles.overlayField} ${styles.overlayFieldWide}`}>
+                <span>Completion Note (optional)</span>
+                <textarea
+                  rows={3}
+                  className={styles.overlayTextarea}
+                  value={completionDialog.note}
+                  onChange={(event) =>
+                    setCompletionDialog((current) =>
+                      current
+                        ? {
+                            ...current,
+                            note: event.target.value,
+                          }
+                        : current,
+                    )
+                  }
+                />
+              </label>
+
+              <label className={styles.teamCheckboxField}>
+                <input
+                  type="checkbox"
+                  checked={completionDialog.preCompleted}
+                  onChange={(event) =>
+                    setCompletionDialog((current) =>
+                      current
+                        ? {
+                            ...current,
+                            preCompleted: event.target.checked,
+                          }
+                        : current,
+                    )
+                  }
+                />
+                <span>Pre-completed before this task day</span>
+              </label>
+
+              <div className={styles.overlayActions}>
+                <button
+                  type="button"
+                  className={styles.ghostButton}
+                  onClick={() => setCompletionDialog(null)}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className={styles.primaryButton}>
+                  Save Completion
+                </button>
+              </div>
+            </form>
+          </article>
+        </section>
+      ) : null}
+
+      {refreshDialogOpen && viewer.role === "super-admin" ? (
+        <section
+          className={styles.overlayRoot}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Refresh scheduling confirmation"
+        >
+          <button
+            type="button"
+            className={styles.overlayScrim}
+            aria-label="Close refresh scheduling dialog"
+            onClick={() => setRefreshDialogOpen(false)}
+          />
+          <article className={styles.overlayPanel}>
+            <header className={styles.overlayHeader}>
+              <div>
+                <h3 className={styles.sectionTitle}>Confirm Scheduling Refresh</h3>
+                <p className={styles.sectionHint}>
+                  Refresh will rebalance open work from today through next week. Completed and
+                  pre-completed vessels stay locked as done.
+                </p>
+              </div>
+              <button
+                type="button"
+                className={styles.overlayCloseButton}
+                onClick={() => setRefreshDialogOpen(false)}
+              >
+                Close
+              </button>
+            </header>
+
+            <div className={styles.stackList}>
+              <article className={styles.miniRow}>
+                <p className={styles.rowMain}>Today open tasks: {refreshPreview.todayOpen}</p>
+                <p className={styles.rowMeta}>Tomorrow open: {refreshPreview.tomorrowOpen}</p>
+              </article>
+              <article className={styles.miniRow}>
+                <p className={styles.rowMain}>Next 7 days open tasks: {refreshPreview.nextWeekOpen}</p>
+                <p className={styles.rowMeta}>Current unassigned role slots: {refreshPreview.shortAssignments}</p>
+              </article>
+            </div>
+
+            <label className={styles.teamCheckboxField}>
+              <input
+                type="checkbox"
+                checked={allowOverrideRebalance}
+                onChange={(event) => setAllowOverrideRebalance(event.target.checked)}
+              />
+              <span>Allow refresh to clear manual vessel overrides and fully rebalance</span>
+            </label>
+
+            <div className={styles.overlayActions}>
+              <button
+                type="button"
+                className={styles.ghostButton}
+                onClick={() => setRefreshDialogOpen(false)}
+                disabled={refreshingScheduling}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={styles.primaryButton}
+                onClick={() => {
+                  void refreshSchedulingPlan({
+                    allowOverrideRebalance,
+                  });
+                }}
+                disabled={refreshingScheduling}
+              >
+                {refreshingScheduling ? "Refreshing..." : "Apply Refresh"}
+              </button>
+            </div>
+          </article>
+        </section>
+      ) : null}
+
+      {editingRow ? (
+        <section
+          className={styles.overlayRoot}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Edit vessel task"
+        >
+          <button
+            type="button"
+            className={styles.overlayScrim}
+            aria-label="Close vessel editor"
+            onClick={() => setEditingRow(null)}
+          />
+          <article className={styles.overlayPanel}>
+            <header className={styles.overlayHeader}>
+              <div>
+                <h3 className={styles.sectionTitle}>Edit Vessel Task: {editingRow.boatName}</h3>
+                <p className={styles.sectionHint}>
+                  Manual override updates assignments and due date for this vessel.
+                </p>
+              </div>
+              <button
+                type="button"
+                className={styles.overlayCloseButton}
+                onClick={() => setEditingRow(null)}
+              >
+                Close
+              </button>
+            </header>
+
+            <form className={styles.overlayForm} onSubmit={saveEditedVessel}>
+              <label className={styles.overlayField}>
+                <span>Vessel Name</span>
+                <input
+                  name="boatName"
+                  className={styles.overlayInput}
+                  defaultValue={editingRow.boatName}
+                />
+              </label>
+
+              <label className={styles.overlayField}>
+                <span>Stat</span>
+                <input name="stat" className={styles.overlayInput} defaultValue={editingRow.stat} />
+              </label>
+
+              <label className={styles.overlayField}>
+                <span>Departure Date</span>
+                <input
+                  name="dueDate"
+                  type="date"
+                  className={styles.overlayInput}
+                  defaultValue={editingRow.dueDate}
+                />
+              </label>
+
+              <label className={styles.overlayField}>
+                <span>Completion %</span>
+                <input
+                  name="completionPct"
+                  type="number"
+                  min={0}
+                  max={100}
+                  className={styles.overlayInput}
+                  defaultValue={editingRow.completionPct}
+                />
+              </label>
+
+                <label className={styles.overlayField}>
+                  <span>Technician</span>
+                <select
+                  name="assignedTechnician"
+                  className={styles.overlayInput}
+                  defaultValue={editingRow.technician.workerLabel}
+                >
+                  <option value="">Unassigned</option>
+                  {technicianOptions.map((label) => (
+                    <option key={`tech-option-${label}`} value={label}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className={styles.overlayField}>
+                <span>Rigger</span>
+                <select
+                  name="assignedRigger"
+                  className={styles.overlayInput}
+                  defaultValue={editingRow.rigger.workerLabel}
+                >
+                  <option value="">Unassigned</option>
+                  {riggerOptions.map((label) => (
+                    <option key={`rigger-option-${label}`} value={label}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className={styles.overlayField}>
+                <span>Shipwright</span>
+                <select
+                  name="assignedShipwright"
+                  className={styles.overlayInput}
+                  defaultValue={editingRow.shipwright.workerLabel}
+                >
+                  <option value="">Unassigned</option>
+                  {shipwrightOptions.map((label) => (
+                    <option key={`shipwright-option-${label}`} value={label}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className={`${styles.overlayField} ${styles.overlayFieldWide}`}>
+                <span>Notes / Job Description</span>
+                <textarea
+                  name="note"
+                  rows={3}
+                  className={styles.overlayTextarea}
+                  defaultValue={editingRow.rationale}
+                />
+              </label>
+
+              <div className={styles.overlayActions}>
+                <button type="button" className={styles.ghostButton} onClick={resetEditedVessel}>
+                  Reset
+                </button>
+                <button type="button" className={styles.ghostButton} onClick={deleteEditedVessel}>
+                  Delete Vessel
+                </button>
+                <button type="submit" className={styles.primaryButton}>
+                  Save Changes
+                </button>
+              </div>
+            </form>
+          </article>
+        </section>
+      ) : null}
     </div>
   );
 }
@@ -433,8 +1236,21 @@ function TimelineLane(input: {
   rows: AssignmentPlanItem[];
   reportDateIso: string;
   taskState: Record<string, true>;
+  taskMeta: Record<
+    string,
+    {
+      completedBy: string;
+      completedAtIso: string;
+      note: string;
+      preCompleted?: boolean;
+    }
+  >;
   pendingTaskIds: Record<string, true>;
-  onToggleTask: (taskId: string) => void;
+  onToggleTask: (taskId: string) => void | Promise<void>;
+  onDoneAll: (rows: AssignmentPlanItem[]) => void;
+  onEditVessel: (row: AssignmentPlanItem) => void;
+  onOpenShortageAction: (role: "technician" | "rigger" | "shipwright") => void;
+  canManageTeam: boolean;
 }) {
   const [page, setPage] = useState(1);
   const totalPages = Math.max(1, Math.ceil(input.rows.length / PAGE_SIZE));
@@ -442,21 +1258,37 @@ function TimelineLane(input: {
   const startIndex = (currentPage - 1) * PAGE_SIZE;
   const pageRows = input.rows.slice(startIndex, startIndex + PAGE_SIZE);
 
+  const openRowCount = input.rows.filter((row) => !input.taskState[row.id]).length;
+
   return (
     <article className={styles.timelineLane}>
       <header className={styles.timelineLaneHeader}>
         <h3 className={styles.timelineLaneTitle}>{input.title}</h3>
         <p className={styles.timelineLaneMeta}>{input.subtitle}</p>
+        {openRowCount > 0 ? (
+          <div className={styles.inlineActions}>
+            <button
+              type="button"
+              className={styles.ghostButton}
+              onClick={() => input.onDoneAll(input.rows)}
+            >
+              Done All ({openRowCount})
+            </button>
+          </div>
+        ) : null}
       </header>
+
       <div className={styles.timelineItems}>
         {pageRows.map((item) => {
           const isDone = Boolean(input.taskState[item.id]);
+          const completionMeta = input.taskMeta[item.id];
           const departureDays = Number.isFinite(item.daysUntilDeparture)
             ? Math.max(0, Math.trunc(item.daysUntilDeparture))
-            : daysUntilIsoFromReport(item.dueDate, input.reportDateIso);
+            : daysUntilIsoFromReport(item.departureDate, input.reportDateIso);
           const cardClass = [
             styles.timelineItemCard,
             priorityRowClass(item.charterPriority),
+            item.source === "Carryover" ? styles.carryoverRow : "",
             departureDays <= 0 ? styles.departureDueTodayRow : "",
             isDone ? styles.taskRowDone : "",
           ]
@@ -464,23 +1296,55 @@ function TimelineLane(input: {
             .join(" ");
 
           return (
-            <article key={item.id} className={cardClass}>
+            <article
+              key={item.id}
+              className={cardClass}
+              onClick={() => input.onEditVessel(item)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  input.onEditVessel(item);
+                }
+              }}
+            >
               <div className={styles.timelineItemTop}>
-                <label className={styles.taskToggle}>
-                  <input
-                    type="checkbox"
-                    checked={isDone}
-                    onChange={() => input.onToggleTask(item.id)}
-                    disabled={Boolean(input.pendingTaskIds[item.id])}
-                    className={styles.taskCheckbox}
-                    aria-label={`Mark task for ${item.boatName} as complete`}
-                  />
-                  <span>{isDone ? "Done" : "Open"}</span>
-                </label>
+                <div className={styles.taskToggleWrap}>
+                  <label
+                    className={styles.taskToggle}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isDone}
+                      onChange={() => {
+                        void input.onToggleTask(item.id);
+                      }}
+                      disabled={Boolean(input.pendingTaskIds[item.id])}
+                      className={styles.taskCheckbox}
+                      aria-label={`Mark task for ${item.boatName} as complete`}
+                    />
+                    <span>{isDone ? "Done" : "Open"}</span>
+                  </label>
+                  {isDone && completionMeta ? (
+                    <span className={styles.taskMarkedMeta}>
+                      Marked by {completionMeta.completedBy}
+                      {completionMeta.preCompleted ? " | Pre-completion" : ""}
+                    </span>
+                  ) : null}
+                </div>
 
-                <span className={departureCountdownClass(departureDays)}>
-                  {departureCountdownLabel(departureDays)}
-                </span>
+                <div className={styles.timelineBadgeGroup}>
+                  <span className={`${styles.statusBadge} ${styles.badgeMedium}`}>
+                    {formatShortDate(parseIsoDate(item.departureDate))}
+                  </span>
+                  <span className={departureCountdownClass(departureDays)}>
+                    {departureCountdownLabel(departureDays)}
+                  </span>
+                </div>
               </div>
 
               <div className={styles.timelineTaskMeta}>
@@ -489,7 +1353,7 @@ function TimelineLane(input: {
                     {item.boatName}
                   </p>
                   <p className={styles.rowMeta}>
-                    Ops Date {item.dueDateLabel} | {item.source} | {item.stat}
+                    Ops Date {item.dueDateLabel} | Departs {item.departureDateLabel} | {item.source} | {item.stat}
                     {item.charterPriorityFlag ? ` | Charter ${item.charterPriorityFlag}` : ""}
                   </p>
                 </div>
@@ -497,9 +1361,24 @@ function TimelineLane(input: {
               </div>
 
               <div className={styles.timelineWorkers}>
-                <WorkerCell worker={item.technician} />
-                <WorkerCell worker={item.rigger} />
-                <WorkerCell worker={item.shipwright} />
+                <WorkerCell
+                  worker={item.technician}
+                  roleLabel="technician"
+                  onOpenShortageAction={input.onOpenShortageAction}
+                  canManageTeam={input.canManageTeam}
+                />
+                <WorkerCell
+                  worker={item.rigger}
+                  roleLabel="rigger"
+                  onOpenShortageAction={input.onOpenShortageAction}
+                  canManageTeam={input.canManageTeam}
+                />
+                <WorkerCell
+                  worker={item.shipwright}
+                  roleLabel="shipwright"
+                  onOpenShortageAction={input.onOpenShortageAction}
+                  canManageTeam={input.canManageTeam}
+                />
               </div>
 
               <p className={styles.timelineRationale}>{item.rationale}</p>
@@ -537,12 +1416,40 @@ function TimelineLane(input: {
   );
 }
 
-function WorkerCell({ worker }: { worker: AssignmentPlanItem["rigger"] }) {
+function WorkerCell(input: {
+  worker: AssignmentPlanItem["rigger"];
+  roleLabel: "technician" | "rigger" | "shipwright";
+  onOpenShortageAction: (role: "technician" | "rigger" | "shipwright") => void;
+  canManageTeam: boolean;
+}) {
+  if (input.worker.assignmentState === "Unassigned") {
+    return (
+      <div className={styles.timelineWorker}>
+        <p className={styles.rowMain}>Short</p>
+        <p className={styles.rowMeta}>Need temporary {input.roleLabel} support.</p>
+        {input.canManageTeam ? (
+          <button
+            type="button"
+            className={styles.inlineLinkButton}
+            onClick={(event) => {
+              event.stopPropagation();
+              input.onOpenShortageAction(input.roleLabel);
+            }}
+          >
+            Add Temporary {capitalize(input.roleLabel)}
+          </button>
+        ) : (
+          <p className={styles.rowMeta}>Notify Super Admin.</p>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className={styles.timelineWorker}>
-      <p className={styles.rowMain}>{worker.workerLabel}</p>
+      <p className={styles.rowMain}>{input.worker.workerLabel}</p>
       <p className={styles.rowMeta}>
-        {worker.assignmentState} | quality {worker.qualityScore}% | load {worker.plannedLoad}
+        {input.worker.assignmentState} | quality {input.worker.qualityScore}% | load {input.worker.plannedLoad}
       </p>
     </div>
   );
@@ -568,6 +1475,58 @@ function compareTimelineRows(left: AssignmentPlanItem, right: AssignmentPlanItem
   }
 
   return left.boatName.localeCompare(right.boatName);
+}
+
+function dedupeAssignmentRows(rows: AssignmentPlanItem[]): AssignmentPlanItem[] {
+  const byKey = new Map<string, AssignmentPlanItem>();
+
+  for (const row of rows) {
+    const key = `${row.dueDate}-${normalizeBoatKey(row.boatName)}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, row);
+      continue;
+    }
+
+    const nextScore = assignmentSourceRank(row.source);
+    const existingScore = assignmentSourceRank(existing.source);
+    if (nextScore > existingScore) {
+      byKey.set(key, row);
+      continue;
+    }
+
+    if (nextScore === existingScore && row.completionPct < existing.completionPct) {
+      byKey.set(key, row);
+      continue;
+    }
+
+    if (
+      nextScore === existingScore &&
+      row.completionPct === existing.completionPct &&
+      row.priority === "Critical" &&
+      existing.priority !== "Critical"
+    ) {
+      byKey.set(key, row);
+    }
+  }
+
+  return [...byKey.values()];
+}
+
+function assignmentSourceRank(source: AssignmentPlanItem["source"]): number {
+  if (source === "Carryover") {
+    return 5;
+  }
+  if (source === "Today") {
+    return 4;
+  }
+  if (source === "Tomorrow") {
+    return 3;
+  }
+  if (source === "Next Week") {
+    return 2;
+  }
+  return 1;
 }
 
 function priorityRowClass(priority: CharterPriorityLevel): string {
@@ -631,6 +1590,37 @@ function normalizeBoatKey(value: string): string {
     .replace(/[^A-Z0-9]+/g, "");
 }
 
+function toUndoCompletionMeta(
+  value:
+    | {
+        completedBy: string;
+        completedAtIso: string;
+        note: string;
+        preCompleted?: boolean;
+      }
+    | undefined,
+): {
+  completedBy: string;
+  completedAtIso: string;
+  note: string;
+  preCompleted: boolean;
+} | null {
+  if (!value) {
+    return null;
+  }
+  return {
+    completedBy: value.completedBy,
+    completedAtIso: value.completedAtIso,
+    note: value.note,
+    preCompleted: Boolean(value.preCompleted),
+  };
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
+}
+
 function parseIsoDate(value: string): Date {
   const [year, month, day] = value.split("-").map((part) => Number(part));
   if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
@@ -667,4 +1657,32 @@ function formatDateLabel(dateIso: string): string {
     day: "numeric",
     year: "numeric",
   });
+}
+
+function formatShortDate(date: Date): string {
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function toLocalDateTimeInput(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  const hours = String(value.getHours()).padStart(2, "0");
+  const minutes = String(value.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function localDateTimeInputToIso(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const date = new Date(trimmed);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toISOString();
 }

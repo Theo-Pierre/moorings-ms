@@ -23,6 +23,7 @@ interface TeamActionPayload {
   previousRole?: WorkforceRoleKey;
   previousLabel?: string;
   daysOff: string[];
+  backAtWorkDateIso?: string | null;
 }
 
 interface TeamMemberDraft {
@@ -32,6 +33,7 @@ interface TeamMemberDraft {
   positionLabel: string;
   daysOff: DayToken[];
   onLeave: boolean;
+  backAtWorkDateIso: string;
 }
 
 interface EditableMemberSnapshot {
@@ -41,6 +43,7 @@ interface EditableMemberSnapshot {
   positionLabel: string;
   daysOff: string[];
   onLeave: boolean;
+  backAtWorkDateIso: string | null;
 }
 
 interface PreviousEditableSnapshot {
@@ -92,48 +95,61 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
       teamRoster.members.map((member) => ({
         ...member,
         daysOff: normalizeDayList(member.daysOff),
+        backAtWorkDateIso:
+          typeof member.backAtWorkDateIso === "string" ? member.backAtWorkDateIso : null,
         todayVessels: [...new Set(member.todayVessels)].sort((left, right) => left.localeCompare(right)),
       })),
     [teamRoster.members],
   );
 
+  const onDutyDay = dayFilter === "all" ? getCurrentDayToken() : dayFilter;
   const onDutyMembersByRole = useMemo(
     () => ({
       technicians: allMembers
-        .filter((member) => member.roleKey === "technicians" && member.availableToday && !member.onLeave)
+        .filter(
+          (member) =>
+            member.roleKey === "technicians" && isMemberAvailableOnDay(member, onDutyDay),
+        )
         .sort((left, right) => left.label.localeCompare(right.label)),
       riggers: allMembers
-        .filter((member) => member.roleKey === "riggers" && member.availableToday && !member.onLeave)
+        .filter(
+          (member) => member.roleKey === "riggers" && isMemberAvailableOnDay(member, onDutyDay),
+        )
         .sort((left, right) => left.label.localeCompare(right.label)),
       shipwrights: allMembers
-        .filter((member) => member.roleKey === "shipwrights" && member.availableToday && !member.onLeave)
+        .filter(
+          (member) =>
+            member.roleKey === "shipwrights" && isMemberAvailableOnDay(member, onDutyDay),
+        )
         .sort((left, right) => left.label.localeCompare(right.label)),
       acTechs: allMembers
-        .filter((member) => member.roleKey === "acTechs" && member.availableToday && !member.onLeave)
+        .filter(
+          (member) => member.roleKey === "acTechs" && isMemberAvailableOnDay(member, onDutyDay),
+        )
         .sort((left, right) => left.label.localeCompare(right.label)),
     }),
-    [allMembers],
+    [allMembers, onDutyDay],
   );
 
   const onDutyCards: Array<{ role: WorkforceRoleKey; label: string; members: typeof allMembers }> = [
     {
       role: "technicians",
-      label: "Technicians On Today",
+      label: `Technicians On ${onDutyDay}`,
       members: onDutyMembersByRole.technicians,
     },
     {
       role: "riggers",
-      label: "Riggers On Today",
+      label: `Riggers On ${onDutyDay}`,
       members: onDutyMembersByRole.riggers,
     },
     {
       role: "shipwrights",
-      label: "Shipwrights On Today",
+      label: `Shipwrights On ${onDutyDay}`,
       members: onDutyMembersByRole.shipwrights,
     },
     {
       role: "acTechs",
-      label: "AC Techs On Today",
+      label: `AC Techs On ${onDutyDay}`,
       members: onDutyMembersByRole.acTechs,
     },
   ];
@@ -216,7 +232,7 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
     return [...labels].sort((left, right) => left.localeCompare(right));
   }, [teamRoster.members, teamRoster.previousMembers]);
 
-  const statusDay = dayFilter === "all" ? getCurrentDayToken() : dayFilter;
+  const statusDay = onDutyDay;
 
   async function sendTeamAction(payload: TeamActionPayload) {
     const response = await fetch("/api/team-members", {
@@ -270,6 +286,10 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
       setError("Name and surname are required.");
       return;
     }
+    if (addDraft.onLeave && !normalizeDateIso(addDraft.backAtWorkDateIso)) {
+      setError("Back at work date is required when marking someone on leave.");
+      return;
+    }
 
     const positionLabel = addDraft.positionLabel.trim() || defaultPositionForRole(addDraft.roleKey);
     const daysOff = addDraft.daysOff;
@@ -293,6 +313,7 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
           label,
           positionLabel,
           daysOff,
+          backAtWorkDateIso: normalizeDateIso(addDraft.backAtWorkDateIso),
         });
       }
 
@@ -320,6 +341,7 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
         positionLabel: member.positionLabel,
         daysOff: normalizeDayList(member.daysOff),
         onLeave: member.onLeave,
+        backAtWorkDateIso: member.backAtWorkDateIso ?? null,
       },
       draft: {
         firstName: split.firstName,
@@ -328,6 +350,7 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
         positionLabel: member.positionLabel,
         daysOff: normalizeDayList(member.daysOff),
         onLeave: member.onLeave,
+        backAtWorkDateIso: member.backAtWorkDateIso ?? "",
       },
     });
   }
@@ -352,6 +375,11 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
     const nextPosition = editing.draft.positionLabel.trim() || defaultPositionForRole(nextRole);
     const nextDaysOff = editing.draft.daysOff;
     const nextLeave = editing.draft.onLeave;
+    const nextBackAtWorkDateIso = normalizeDateIso(editing.draft.backAtWorkDateIso);
+    if (nextLeave && !nextBackAtWorkDateIso) {
+      setError("Back at work date is required when marking someone on leave.");
+      return;
+    }
 
     const oldNormalized = normalizeLabel(editing.original.label);
     const newNormalized = normalizeLabel(nextLabel);
@@ -369,6 +397,7 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
             previousRole: editing.original.roleKey,
             previousLabel: editing.original.label,
             daysOff: nextDaysOff,
+            backAtWorkDateIso: nextBackAtWorkDateIso,
           });
           if (nextLeave) {
             await sendTeamAction({
@@ -377,6 +406,7 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
               label: nextLabel,
               positionLabel: nextPosition,
               daysOff: nextDaysOff,
+              backAtWorkDateIso: nextBackAtWorkDateIso,
             });
           }
           return;
@@ -388,15 +418,21 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
           label: nextLabel,
           positionLabel: nextPosition,
           daysOff: nextDaysOff,
+          backAtWorkDateIso: nextBackAtWorkDateIso,
         });
 
-        if (editing.original.onLeave !== nextLeave) {
+        if (
+          editing.original.onLeave !== nextLeave ||
+          (nextLeave &&
+            normalizeDateIso(editing.original.backAtWorkDateIso) !== nextBackAtWorkDateIso)
+        ) {
           await sendTeamAction({
             action: nextLeave ? "leave" : "return",
             role: nextRole,
             label: nextLabel,
             positionLabel: nextPosition,
             daysOff: nextDaysOff,
+            backAtWorkDateIso: nextLeave ? nextBackAtWorkDateIso : null,
           });
         }
       },
@@ -427,6 +463,7 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
         positionLabel: member.positionLabel,
         daysOff: normalizeDayList(member.daysOff),
         onLeave: false,
+        backAtWorkDateIso: "",
       },
     });
   }
@@ -514,7 +551,7 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
               onClick={() => {
                 setOnDutyRoleView((current) => (current === card.role ? null : card.role));
                 setRoleFilter(card.role);
-                setDayFilter(getCurrentDayToken());
+                setDayFilter(onDutyDay);
               }}
             >
               <p className={styles.metricLabel}>{card.label}</p>
@@ -529,9 +566,9 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
         <section className={styles.panelCard}>
           <div className={styles.panelHeaderSplit}>
             <div>
-              <h2 className={styles.sectionTitle}>{roleLabelFromKey(onDutyRoleView)} On Today</h2>
+              <h2 className={styles.sectionTitle}>{roleLabelFromKey(onDutyRoleView)} On {statusDay}</h2>
               <p className={styles.sectionHint}>
-                Current on-duty team members and their assigned vessels for today.
+                Current on-duty team members and their assigned vessels for {statusDay}.
               </p>
             </div>
             <button type="button" className={styles.ghostButton} onClick={() => setOnDutyRoleView(null)}>
@@ -939,6 +976,22 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
               />
               <span>Mark as on leave now</span>
             </label>
+            {addDraft.onLeave ? (
+              <label className={styles.overlayField}>
+                <span>Back At Work Date</span>
+                <input
+                  type="date"
+                  className={styles.overlayInput}
+                  value={addDraft.backAtWorkDateIso}
+                  onChange={(event) =>
+                    setAddDraft((current) => ({
+                      ...current,
+                      backAtWorkDateIso: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+            ) : null}
             <div className={styles.inlineActions}>
               <button type="submit" className={styles.primaryButton} disabled={adding || isPending}>
                 {adding ? "Saving..." : "Save Team Member"}
@@ -981,22 +1034,19 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
               searchedMembers.map((member) => {
                 const isAvailable = isMemberAvailableOnDay(member, statusDay);
                 const isAllDaysView = dayFilter === "all";
+                const leaveActive = isMemberOnLeave(member);
                 const editingThis = editing?.original.id === member.id;
                 const busy =
                   actionBusyKey === `remove-${member.id}` ||
                   actionBusyKey === `leave-${member.id}` ||
                   actionBusyKey === `edit-${member.id}`;
-                const statusText = isAllDaysView
-                  ? member.onLeave
-                    ? "On Leave"
-                    : isAvailable
-                      ? `On (${statusDay})`
-                      : `Off (${statusDay})`
-                  : member.onLeave
-                    ? "On Leave"
-                    : isAvailable
-                      ? `On (${statusDay})`
-                      : `Off (${statusDay})`;
+                const statusText = leaveActive
+                  ? member.backAtWorkDateIso
+                    ? `On Leave until ${formatDateToken(member.backAtWorkDateIso)}`
+                    : "On Leave"
+                  : isAvailable
+                    ? `On (${statusDay})`
+                    : `Off (${statusDay})`;
                 const offDaysText = member.daysOff.length > 0 ? member.daysOff.join("/") : "None";
 
                 return (
@@ -1016,14 +1066,21 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
                           Days off: {offDaysText}
                         </p>
                       )}
+                      {member.backAtWorkDateIso ? (
+                        <p className={styles.rowMeta}>
+                          Back at work: {formatDateToken(member.backAtWorkDateIso)}
+                        </p>
+                      ) : null}
                     </div>
 
                     <div className={isAllDaysView ? `${styles.teamMemberActions} ${styles.teamMemberActionsAllDays}` : styles.teamMemberActions}>
                       <span
                         className={
-                          member.onLeave || !isAvailable
-                            ? `${styles.statusBadge} ${styles.availabilityOff}`
-                            : `${styles.statusBadge} ${styles.availabilityOn}`
+                          leaveActive
+                            ? `${styles.statusBadge} ${styles.availabilityLeave}`
+                            : !isAvailable
+                              ? `${styles.statusBadge} ${styles.availabilityOff}`
+                              : `${styles.statusBadge} ${styles.availabilityOn}`
                         }
                       >
                         {statusText}
@@ -1043,23 +1100,54 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
                           <button
                             type="button"
                             className={styles.ghostButton}
-                            onClick={() =>
-                              applyAction(
+                            onClick={async () => {
+                              if (!leaveActive) {
+                                const suggestedDate = toIsoDate(addDays(new Date(), 1));
+                                const promptValue = window.prompt(
+                                  `Back at work date for ${member.label} (YYYY-MM-DD):`,
+                                  suggestedDate,
+                                );
+                                if (promptValue === null) {
+                                  return;
+                                }
+                                const normalized = normalizeDateIso(promptValue);
+                                if (!normalized) {
+                                  setError("Back at work date must be in YYYY-MM-DD format.");
+                                  return;
+                                }
+                                await applyAction(
+                                  `leave-${member.id}`,
+                                  () =>
+                                    sendTeamAction({
+                                      action: "leave",
+                                      role: member.roleKey,
+                                      label: member.label,
+                                      positionLabel: member.positionLabel,
+                                      daysOff: member.daysOff,
+                                      backAtWorkDateIso: normalized,
+                                    }),
+                                  `${member.label} marked on leave.`,
+                                );
+                                return;
+                              }
+
+                              await applyAction(
                                 `leave-${member.id}`,
                                 () =>
                                   sendTeamAction({
-                                    action: member.onLeave ? "return" : "leave",
+                                    action: "return",
                                     role: member.roleKey,
                                     label: member.label,
                                     positionLabel: member.positionLabel,
                                     daysOff: member.daysOff,
+                                    backAtWorkDateIso: null,
                                   }),
-                                member.onLeave ? `${member.label} returned from leave.` : `${member.label} marked on leave.`,
-                              )
-                            }
+                                `${member.label} returned from leave.`,
+                              );
+                            }}
                             disabled={busy || isPending}
                           >
-                            {member.onLeave ? "Return" : "Leave"}
+                            {leaveActive ? "Return" : "Leave"}
                           </button>
                           <button
                             type="button"
@@ -1208,6 +1296,29 @@ export function TeamControlPanel({ teamRoster, canManage }: TeamControlPanelProp
                           />
                           <span>On leave</span>
                         </label>
+                        {editing.draft.onLeave ? (
+                          <label className={styles.overlayField}>
+                            <span>Back At Work Date</span>
+                            <input
+                              type="date"
+                              className={styles.overlayInput}
+                              value={editing.draft.backAtWorkDateIso}
+                              onChange={(event) =>
+                                setEditing((current) =>
+                                  current
+                                    ? {
+                                        ...current,
+                                        draft: {
+                                          ...current.draft,
+                                          backAtWorkDateIso: event.target.value,
+                                        },
+                                      }
+                                    : current,
+                                )
+                              }
+                            />
+                          </label>
+                        ) : null}
                         <div className={styles.inlineActions}>
                           <button type="submit" className={styles.primaryButton} disabled={busy || isPending}>
                             Save Changes
@@ -1256,6 +1367,7 @@ function buildDefaultDraft(role: WorkforceRoleKey): TeamMemberDraft {
     positionLabel: defaultPositionForRole(role),
     daysOff: [],
     onLeave: false,
+    backAtWorkDateIso: "",
   };
 }
 
@@ -1295,14 +1407,29 @@ function normalizeDayList(days: string[]): DayToken[] {
 }
 
 function isMemberAvailableOnDay(
-  member: { daysOff: string[]; onLeave: boolean },
+  member: { daysOff: string[]; onLeave: boolean; backAtWorkDateIso?: string | null },
   day: DayToken,
 ): boolean {
-  if (member.onLeave) {
+  if (isMemberOnLeave(member)) {
     return false;
   }
   const normalizedOff = normalizeDayList(member.daysOff);
   return !normalizedOff.includes(day);
+}
+
+function isMemberOnLeave(member: {
+  onLeave: boolean;
+  backAtWorkDateIso?: string | null;
+}): boolean {
+  if (!member.onLeave) {
+    return false;
+  }
+  const backAtWork = normalizeDateIso(member.backAtWorkDateIso);
+  if (!backAtWork) {
+    return true;
+  }
+  const todayIso = getCurrentDateIso();
+  return todayIso < backAtWork;
 }
 
 function normalizeDayToken(day: string): DayToken | null {
@@ -1329,6 +1456,50 @@ function normalizeDayToken(day: string): DayToken | null {
     return "Sun";
   }
   return null;
+}
+
+function normalizeDateIso(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
+}
+
+function getCurrentDateIso(): string {
+  const now = new Date();
+  return toIsoDate(now);
+}
+
+function toIsoDate(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function addDays(value: Date, days: number): Date {
+  const next = new Date(value);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function formatDateToken(value: string): string {
+  const normalized = normalizeDateIso(value);
+  if (!normalized) {
+    return value;
+  }
+  const [year, month, day] = normalized.split("-").map((part) => Number(part));
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return normalized;
+  }
+  return new Date(year, month - 1, day).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function DayChecklistDropdown(input: {
