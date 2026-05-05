@@ -14,9 +14,12 @@ import {
   clearAllVesselOverrides,
   getVesselOverrideSnapshot,
   removeVesselOverride,
+  upsertVesselArrival,
   upsertVesselOverride,
   useManualAssignmentRows,
+  useVesselArrivalStates,
   useVesselOverrides,
+  type VesselArrivalStatus,
 } from "./manual-vessels";
 import { useSharedTaskState } from "./shared-task-state";
 import { pushUndoAction } from "./undo-stack";
@@ -25,6 +28,11 @@ import styles from "./crm.module.css";
 type TaskFilter = "all" | "open" | "done";
 type DayView = "all" | "yesterday" | "today" | "tomorrow" | "nextWeek";
 type SearchScope = "all" | "vessel" | "technician" | "rigger" | "shipwright";
+type ScheduleRow = AssignmentPlanItem & {
+  arrivalStatus: VesselArrivalStatus;
+  arrivalStatusLabel: string;
+  arrivalGateActive: boolean;
+};
 const PAGE_SIZE = 5;
 
 interface SchedulePageProps {
@@ -51,6 +59,7 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
 
   const manualAssignmentRows = useManualAssignmentRows();
   const vesselOverrides = useVesselOverrides();
+  const vesselArrivalStates = useVesselArrivalStates();
   const assignmentRows = useMemo(
     () =>
       applyVesselOverridesToAssignmentRows(
@@ -120,16 +129,23 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
   );
 
   const effectiveExecutionRows = useMemo(() => dedupeAssignmentRows(executionRows), [executionRows]);
+  const scheduledRows = useMemo(
+    () =>
+      effectiveExecutionRows.map((row) =>
+        applyArrivalGate(row, vesselArrivalStates[row.id]?.status),
+      ),
+    [effectiveExecutionRows, vesselArrivalStates],
+  );
 
   const rowById = useMemo(
-    () => new Map(effectiveExecutionRows.map((item) => [item.id, item])),
-    [effectiveExecutionRows],
+    () => new Map(scheduledRows.map((item) => [item.id, item])),
+    [scheduledRows],
   );
 
   const rows = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
-    return effectiveExecutionRows.filter((item) => {
+    return scheduledRows.filter((item) => {
       const isDone = Boolean(taskState[item.id]);
 
       if (
@@ -196,7 +212,7 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
   }, [
     data.reportDateIso,
     dayView,
-    effectiveExecutionRows,
+    scheduledRows,
     nextOperationalIso,
     nextWeekEndIso,
     query,
@@ -208,14 +224,14 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
   const searchSuggestions = useMemo(() => {
     const values =
       searchScope === "vessel"
-        ? effectiveExecutionRows.flatMap((item) => [item.boatName, item.stat])
+        ? scheduledRows.flatMap((item) => [item.boatName, item.stat])
         : searchScope === "technician"
-          ? effectiveExecutionRows.map((item) => item.technician.workerLabel)
+          ? scheduledRows.map((item) => item.technician.workerLabel)
           : searchScope === "rigger"
-            ? effectiveExecutionRows.map((item) => item.rigger.workerLabel)
+            ? scheduledRows.map((item) => item.rigger.workerLabel)
             : searchScope === "shipwright"
-              ? effectiveExecutionRows.map((item) => item.shipwright.workerLabel)
-              : effectiveExecutionRows.flatMap((item) => [
+              ? scheduledRows.map((item) => item.shipwright.workerLabel)
+              : scheduledRows.flatMap((item) => [
                   item.boatName,
                   item.stat,
                   item.technician.workerLabel,
@@ -226,7 +242,7 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
     return [...new Set(values.filter(Boolean))]
       .sort((left, right) => left.localeCompare(right))
       .slice(0, 200);
-  }, [effectiveExecutionRows, searchScope]);
+  }, [scheduledRows, searchScope]);
 
   const orderedRows = useMemo(() => [...rows].sort(compareTimelineRows), [rows]);
   const technicianOptions = useMemo(
@@ -261,16 +277,15 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
   );
   const todayRows = useMemo(
     () =>
-      orderedRows.filter(
-        (item) =>
-          item.dueDate === data.reportDateIso ||
-          (item.source === "Carryover" && item.dueDate <= data.reportDateIso),
+      orderedRows.filter((item) =>
+        isTodayReadinessRow(item, data.reportDateIso, nextWeekEndIso),
       ),
-    [data.reportDateIso, orderedRows],
+    [data.reportDateIso, nextWeekEndIso, orderedRows],
   );
+  const todayRowIds = useMemo(() => new Set(todayRows.map((item) => item.id)), [todayRows]);
   const tomorrowRows = useMemo(
-    () => orderedRows.filter((item) => item.dueDate === nextOperationalIso),
-    [nextOperationalIso, orderedRows],
+    () => orderedRows.filter((item) => item.dueDate === nextOperationalIso && !todayRowIds.has(item.id)),
+    [nextOperationalIso, orderedRows, todayRowIds],
   );
   const yesterdayRows = useMemo(
     () =>
@@ -281,8 +296,11 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
   );
 
   const upcomingDateGroups = useMemo(() => {
-    const grouped = new Map<string, AssignmentPlanItem[]>();
+    const grouped = new Map<string, ScheduleRow[]>();
     for (const row of orderedRows) {
+      if (todayRowIds.has(row.id)) {
+        continue;
+      }
       if (row.dueDate <= nextOperationalIso) {
         continue;
       }
@@ -293,7 +311,7 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
     return [...grouped.entries()]
       .sort((left, right) => left[0].localeCompare(right[0]))
       .map(([dateIso, items]) => ({ dateIso, label: formatDateLabel(dateIso), items }));
-  }, [nextOperationalIso, orderedRows]);
+  }, [nextOperationalIso, orderedRows, todayRowIds]);
 
   const totalTaskCount = rows.length;
   const completedTaskCount = rows.reduce(
@@ -303,6 +321,11 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
   const openTaskCount = Math.max(0, totalTaskCount - completedTaskCount);
 
   async function toggleTask(id: string) {
+    const row = rowById.get(id);
+    if (row && !row.arrivalGateActive) {
+      setSaveMessage(`${row.boatName} is not in the workload until arrival is confirmed.`);
+      return;
+    }
     const nextDone = !Boolean(taskState[id]);
     if (!nextDone) {
       const previousMeta = taskMeta[id];
@@ -320,7 +343,6 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
       return;
     }
 
-    const row = rowById.get(id);
     if (!row) {
       const completionMeta = {
         completedBy: viewer.name || viewer.email,
@@ -395,7 +417,10 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
     if (savingBulkDone) {
       return;
     }
-    const openRows = rowsForLane.filter((row) => !taskState[row.id]);
+    const openRows = rowsForLane.filter((row) => {
+      const scheduleRow = row as ScheduleRow;
+      return scheduleRow.arrivalGateActive && !taskState[row.id];
+    });
     if (openRows.length === 0) {
       return;
     }
@@ -441,13 +466,16 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
   }
 
   const refreshPreview = useMemo(() => {
-    const todayOpen = todayRows.filter((row) => !taskState[row.id]).length;
+    const todayOpen = todayRows.filter((row) => row.arrivalGateActive && !taskState[row.id]).length;
     const tomorrowOpen = tomorrowRows.filter((row) => !taskState[row.id]).length;
     const nextWeekOpen = upcomingDateGroups.reduce(
       (sum, group) => sum + group.items.filter((row) => !taskState[row.id]).length,
       0,
     );
     const shortAssignments = todayRows.reduce((sum, row) => {
+      if (!row.arrivalGateActive) {
+        return sum;
+      }
       const missing =
         Number(row.technician.assignmentState === "Unassigned") +
         Number(row.rigger.assignmentState === "Unassigned") +
@@ -525,6 +553,11 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
       note: String(form.get("note") ?? editingRow.rationale),
       deleted: false,
     });
+    const arrivalStatus = normalizeArrivalStatusInput(form.get("arrivalStatus"));
+    upsertVesselArrival({
+      taskKey: editingRow.id,
+      status: arrivalStatus,
+    });
     pushUndoAction({
       type: "vessel-override",
       boatKey,
@@ -535,6 +568,20 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
 
     setSaveMessage(`Updated ${editingRow.boatName}.`);
     setEditingRow(null);
+  }
+
+  function updateArrivalStatus(row: ScheduleRow, status: VesselArrivalStatus) {
+    upsertVesselArrival({
+      taskKey: row.id,
+      status,
+    });
+    setSaveMessage(
+      status === "arrived"
+        ? `${row.boatName} marked arrived and added to workload.`
+        : status === "delayed"
+          ? `${row.boatName} marked delayed and held out of workload.`
+          : `${row.boatName} is awaiting arrival confirmation.`,
+    );
   }
 
   function deleteEditedVessel() {
@@ -792,6 +839,7 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
               taskMeta={taskMeta}
               pendingTaskIds={pendingTaskIds}
               onToggleTask={toggleTask}
+              onArrivalStatusChange={updateArrivalStatus}
               onDoneAll={(laneRows) => {
                 void markAllDone(laneRows, "Yesterday");
               }}
@@ -811,6 +859,7 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
               taskMeta={taskMeta}
               pendingTaskIds={pendingTaskIds}
               onToggleTask={toggleTask}
+              onArrivalStatusChange={updateArrivalStatus}
               onDoneAll={(laneRows) => {
                 void markAllDone(laneRows, "Today");
               }}
@@ -830,6 +879,7 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
               taskMeta={taskMeta}
               pendingTaskIds={pendingTaskIds}
               onToggleTask={toggleTask}
+              onArrivalStatusChange={updateArrivalStatus}
               onDoneAll={(laneRows) => {
                 void markAllDone(laneRows, "Tomorrow");
               }}
@@ -851,6 +901,7 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
                   taskMeta={taskMeta}
                   pendingTaskIds={pendingTaskIds}
                   onToggleTask={toggleTask}
+                  onArrivalStatusChange={updateArrivalStatus}
                   onDoneAll={(laneRows) => {
                     void markAllDone(laneRows, `Upcoming ${group.label}`);
                   }}
@@ -1122,6 +1173,19 @@ export function SchedulePage({ data, viewer }: SchedulePageProps) {
               </label>
 
               <label className={styles.overlayField}>
+                <span>Arrival Status</span>
+                <select
+                  name="arrivalStatus"
+                  className={styles.overlayInput}
+                  defaultValue={(editingRow as ScheduleRow).arrivalStatus ?? "awaiting"}
+                >
+                  <option value="awaiting">Awaiting arrival</option>
+                  <option value="arrived">Arrived in marina</option>
+                  <option value="delayed">Delayed / not arrived</option>
+                </select>
+              </label>
+
+              <label className={styles.overlayField}>
                 <span>Departure Date</span>
                 <input
                   name="dueDate"
@@ -1233,7 +1297,7 @@ function PriorityBadge({ priority }: { priority: AssignmentPlanItem["priority"] 
 function TimelineLane(input: {
   title: string;
   subtitle: string;
-  rows: AssignmentPlanItem[];
+  rows: ScheduleRow[];
   reportDateIso: string;
   taskState: Record<string, true>;
   taskMeta: Record<
@@ -1247,8 +1311,9 @@ function TimelineLane(input: {
   >;
   pendingTaskIds: Record<string, true>;
   onToggleTask: (taskId: string) => void | Promise<void>;
-  onDoneAll: (rows: AssignmentPlanItem[]) => void;
-  onEditVessel: (row: AssignmentPlanItem) => void;
+  onArrivalStatusChange: (row: ScheduleRow, status: VesselArrivalStatus) => void;
+  onDoneAll: (rows: ScheduleRow[]) => void;
+  onEditVessel: (row: ScheduleRow) => void;
   onOpenShortageAction: (role: "technician" | "rigger" | "shipwright") => void;
   canManageTeam: boolean;
 }) {
@@ -1258,13 +1323,17 @@ function TimelineLane(input: {
   const startIndex = (currentPage - 1) * PAGE_SIZE;
   const pageRows = input.rows.slice(startIndex, startIndex + PAGE_SIZE);
 
-  const openRowCount = input.rows.filter((row) => !input.taskState[row.id]).length;
+  const openRowCount = input.rows.filter((row) => row.arrivalGateActive && !input.taskState[row.id]).length;
+  const awaitingRowCount = input.rows.filter((row) => !row.arrivalGateActive).length;
 
   return (
     <article className={styles.timelineLane}>
       <header className={styles.timelineLaneHeader}>
         <h3 className={styles.timelineLaneTitle}>{input.title}</h3>
-        <p className={styles.timelineLaneMeta}>{input.subtitle}</p>
+        <p className={styles.timelineLaneMeta}>
+          {input.subtitle}
+          {awaitingRowCount > 0 ? ` | ${awaitingRowCount} awaiting arrival` : ""}
+        </p>
         {openRowCount > 0 ? (
           <div className={styles.inlineActions}>
             <button
@@ -1290,6 +1359,7 @@ function TimelineLane(input: {
             priorityRowClass(item.charterPriority),
             item.source === "Carryover" ? styles.carryoverRow : "",
             departureDays <= 0 ? styles.departureDueTodayRow : "",
+            !item.arrivalGateActive ? styles.awaitingArrivalRow : "",
             isDone ? styles.taskRowDone : "",
           ]
             .filter(Boolean)
@@ -1323,11 +1393,11 @@ function TimelineLane(input: {
                       onChange={() => {
                         void input.onToggleTask(item.id);
                       }}
-                      disabled={Boolean(input.pendingTaskIds[item.id])}
+                      disabled={!item.arrivalGateActive || Boolean(input.pendingTaskIds[item.id])}
                       className={styles.taskCheckbox}
                       aria-label={`Mark task for ${item.boatName} as complete`}
                     />
-                    <span>{isDone ? "Done" : "Open"}</span>
+                    <span>{isDone ? "Done" : item.arrivalGateActive ? "Open" : "Waiting"}</span>
                   </label>
                   {isDone && completionMeta ? (
                     <span className={styles.taskMarkedMeta}>
@@ -1340,6 +1410,9 @@ function TimelineLane(input: {
                 <div className={styles.timelineBadgeGroup}>
                   <span className={`${styles.statusBadge} ${styles.badgeMedium}`}>
                     {formatShortDate(parseIsoDate(item.departureDate))}
+                  </span>
+                  <span className={arrivalBadgeClass(item.arrivalStatus)}>
+                    {item.arrivalStatusLabel}
                   </span>
                   <span className={departureCountdownClass(departureDays)}>
                     {departureCountdownLabel(departureDays)}
@@ -1356,30 +1429,64 @@ function TimelineLane(input: {
                     Ops Date {item.dueDateLabel} | Departs {item.departureDateLabel} | {item.source} | {item.stat}
                     {item.charterPriorityFlag ? ` | Charter ${item.charterPriorityFlag}` : ""}
                   </p>
+                  <p className={styles.rowMeta}>
+                    Arrival: {arrivalScheduleLabel(item)}
+                  </p>
                 </div>
                 <PriorityBadge priority={item.priority} />
               </div>
 
-              <div className={styles.timelineWorkers}>
-                <WorkerCell
-                  worker={item.technician}
-                  roleLabel="technician"
-                  onOpenShortageAction={input.onOpenShortageAction}
-                  canManageTeam={input.canManageTeam}
-                />
-                <WorkerCell
-                  worker={item.rigger}
-                  roleLabel="rigger"
-                  onOpenShortageAction={input.onOpenShortageAction}
-                  canManageTeam={input.canManageTeam}
-                />
-                <WorkerCell
-                  worker={item.shipwright}
-                  roleLabel="shipwright"
-                  onOpenShortageAction={input.onOpenShortageAction}
-                  canManageTeam={input.canManageTeam}
-                />
-              </div>
+              {item.arrivalGateActive ? (
+                <div className={styles.timelineWorkers}>
+                  <WorkerCell
+                    worker={item.technician}
+                    roleLabel="technician"
+                    onOpenShortageAction={input.onOpenShortageAction}
+                    canManageTeam={input.canManageTeam}
+                  />
+                  <WorkerCell
+                    worker={item.rigger}
+                    roleLabel="rigger"
+                    onOpenShortageAction={input.onOpenShortageAction}
+                    canManageTeam={input.canManageTeam}
+                  />
+                  <WorkerCell
+                    worker={item.shipwright}
+                    roleLabel="shipwright"
+                    onOpenShortageAction={input.onOpenShortageAction}
+                    canManageTeam={input.canManageTeam}
+                  />
+                </div>
+              ) : (
+                <div className={styles.arrivalGatePanel}>
+                  <p className={styles.rowMain}>Held out of workforce load</p>
+                  <p className={styles.rowMeta}>
+                    Confirm arrival before assigning technician, rigger, or shipwright work.
+                  </p>
+                  <div className={styles.inlineActions}>
+                    <button
+                      type="button"
+                      className={styles.primaryButton}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        input.onArrivalStatusChange(item, "arrived");
+                      }}
+                    >
+                      Mark Arrived
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.ghostButton}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        input.onArrivalStatusChange(item, "delayed");
+                      }}
+                    >
+                      Delayed
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <p className={styles.timelineRationale}>{item.rationale}</p>
             </article>
@@ -1453,6 +1560,63 @@ function WorkerCell(input: {
       </p>
     </div>
   );
+}
+
+function applyArrivalGate(
+  row: AssignmentPlanItem,
+  savedStatus: VesselArrivalStatus | undefined,
+): ScheduleRow {
+  const isManual = row.id.startsWith("manual-");
+  const arrivalStatus = savedStatus ?? (isManual ? "arrived" : "awaiting");
+  const arrivalGateActive = arrivalStatus === "arrived";
+  const arrivalStatusLabel =
+    arrivalStatus === "arrived"
+      ? "Arrived"
+      : arrivalStatus === "delayed"
+        ? "Delayed"
+        : "Awaiting arrival";
+
+  return {
+    ...row,
+    arrivalStatus,
+    arrivalStatusLabel,
+    arrivalGateActive,
+  };
+}
+
+function isTodayReadinessRow(
+  row: ScheduleRow,
+  reportDateIso: string,
+  horizonEndIso: string,
+): boolean {
+  if (row.source === "Yesterday") {
+    return false;
+  }
+  if (row.source === "Carryover" && row.dueDate <= reportDateIso) {
+    return true;
+  }
+  return row.departureDate >= reportDateIso && row.departureDate <= horizonEndIso;
+}
+
+function normalizeArrivalStatusInput(value: FormDataEntryValue | null): VesselArrivalStatus {
+  return value === "arrived" || value === "delayed" || value === "awaiting" ? value : "awaiting";
+}
+
+function arrivalBadgeClass(status: VesselArrivalStatus): string {
+  if (status === "arrived") {
+    return `${styles.statusBadge} ${styles.badgeMedium}`;
+  }
+  if (status === "delayed") {
+    return `${styles.statusBadge} ${styles.badgeCritical}`;
+  }
+  return `${styles.statusBadge} ${styles.badgeAwaiting}`;
+}
+
+function arrivalScheduleLabel(row: ScheduleRow): string {
+  if (row.plannedArrivalDateLabel) {
+    return `${row.plannedArrivalDateLabel}${row.plannedArrivalTime ? ` at ${row.plannedArrivalTime}` : ""}`;
+  }
+  return "not confirmed in fleet sheet";
 }
 
 function compareTimelineRows(left: AssignmentPlanItem, right: AssignmentPlanItem): number {

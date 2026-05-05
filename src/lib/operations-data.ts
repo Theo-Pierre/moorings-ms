@@ -108,6 +108,9 @@ export interface AssignmentPlanItem {
   dueDateLabel: string;
   departureDate: string;
   departureDateLabel: string;
+  plannedArrivalDate: string | null;
+  plannedArrivalDateLabel: string | null;
+  plannedArrivalTime: string | null;
   daysUntilDeparture: number;
   timeWindow: string;
   priority: Priority;
@@ -325,6 +328,8 @@ interface TurnaroundEntry {
   dateIso: string;
   sourceDateIso: string;
   departureDateIso: string;
+  plannedArrivalDateIso: string | null;
+  plannedArrivalTime: string | null;
   daysUntilDeparture: number;
   stat: string;
   boatName: string;
@@ -428,6 +433,7 @@ const roleCapacityRules: ReadonlyArray<{
 interface DailyTargetRow {
   dateIso: string;
   section: string;
+  movementType: "arrival" | "departure";
   type: string;
   size: string;
   boatName: string;
@@ -1043,6 +1049,7 @@ function parseDailyTargetRows(workbook: XLSX.WorkBook): DailyTargetRow[] {
     parsedRows.push({
       dateIso: currentDateIso,
       section: currentSection || "Daily TA Tortola",
+      movementType: "departure",
       type,
       size,
       boatName,
@@ -1094,8 +1101,12 @@ function parseDailyTargetRowsFromSimpleMovementGrid(rows: unknown[][]): DailyTar
       continue;
     }
 
-    // Departure readiness planning stays departure-focused.
-    if (!movement.includes("DEPART")) {
+    const movementType = movement.includes("ARRIVAL")
+      ? "arrival"
+      : movement.includes("DEPART")
+        ? "departure"
+        : null;
+    if (!movementType) {
       continue;
     }
 
@@ -1110,6 +1121,7 @@ function parseDailyTargetRowsFromSimpleMovementGrid(rows: unknown[][]): DailyTar
     output.push({
       dateIso,
       section: "Daily TA Tortola",
+      movementType,
       type: "MP",
       size: "",
       boatName,
@@ -1117,7 +1129,7 @@ function parseDailyTargetRowsFromSimpleMovementGrid(rows: unknown[][]): DailyTar
       daysUntilNextCharter: "",
       nextCharterDateIso: dateIso,
       nextCharterStartTime: startTime,
-      technicalCompletionRaw: "PENDING",
+      technicalCompletionRaw: movementType === "arrival" ? "ARRIVAL" : "PENDING",
       cleaningCompletionRaw: annotationParts.join(" | "),
     });
   }
@@ -1491,7 +1503,7 @@ function buildStartsFiguresFromDailyTargets(
   const grouped = new Map<string, StartFigure>();
 
   for (const row of dailyRows) {
-    if (row.dateIso !== reportDateIso || !isPowerType(row.type)) {
+    if (row.dateIso !== reportDateIso || row.movementType !== "departure" || !isPowerType(row.type)) {
       continue;
     }
 
@@ -2027,6 +2039,7 @@ function buildTurnaroundEntries(
   charterPriorityByDateBoat: Map<string, VesselCharterPriority>,
 ): TurnaroundEntry[] {
   const byDateBoat = new Map<string, TurnaroundEntry>();
+  const arrivalsByBoat = buildArrivalRowsByBoat(rows);
 
   for (const row of rows) {
     const boatName = cleanCellText(row.boatName);
@@ -2036,10 +2049,17 @@ function buildTurnaroundEntries(
     if (!isPowerType(row.type)) {
       continue;
     }
+    if (row.movementType !== "departure") {
+      continue;
+    }
 
     const boatKey = normalizeBoatName(boatName);
     const departureDateIso = normalizeSheetDate(row.nextCharterDateIso) || row.dateIso;
     const operationalDateIso = normalizeSheetDate(row.dateIso) || departureDateIso;
+    const plannedArrival = resolvePlannedArrivalForDeparture(
+      arrivalsByBoat.get(boatKey) ?? [],
+      operationalDateIso,
+    );
     const key = `${operationalDateIso}-${boatKey}`;
     const charterPriority =
       charterPriorityByDateBoat.get(`${departureDateIso}-${boatKey}`) ??
@@ -2137,6 +2157,8 @@ function buildTurnaroundEntries(
       dateIso: operationalDateIso,
       sourceDateIso: row.dateIso,
       departureDateIso,
+      plannedArrivalDateIso: plannedArrival?.dateIso ?? null,
+      plannedArrivalTime: plannedArrival?.time ?? null,
       daysUntilDeparture: urgency,
       stat: row.type || "MP",
       boatName,
@@ -2172,6 +2194,53 @@ function buildTurnaroundEntries(
     }
     return left.boatName.localeCompare(right.boatName);
   });
+}
+
+function buildArrivalRowsByBoat(
+  rows: DailyTargetRow[],
+): Map<string, Array<{ dateIso: string; time: string }>> {
+  const byBoat = new Map<string, Array<{ dateIso: string; time: string }>>();
+  for (const row of rows) {
+    if (row.movementType !== "arrival" || !isPowerType(row.type)) {
+      continue;
+    }
+    const boatKey = normalizeBoatName(row.boatName);
+    const dateIso = normalizeSheetDate(row.dateIso);
+    if (!boatKey || !dateIso) {
+      continue;
+    }
+    const bucket = byBoat.get(boatKey) ?? [];
+    bucket.push({
+      dateIso,
+      time: cleanCellText(row.nextCharterStartTime),
+    });
+    byBoat.set(boatKey, bucket);
+  }
+
+  for (const bucket of byBoat.values()) {
+    bucket.sort((left, right) => {
+      if (left.dateIso !== right.dateIso) {
+        return left.dateIso.localeCompare(right.dateIso);
+      }
+      return left.time.localeCompare(right.time);
+    });
+  }
+
+  return byBoat;
+}
+
+function resolvePlannedArrivalForDeparture(
+  arrivals: Array<{ dateIso: string; time: string }>,
+  departureDateIso: string,
+): { dateIso: string; time: string } | null {
+  let selected: { dateIso: string; time: string } | null = null;
+  for (const arrival of arrivals) {
+    if (arrival.dateIso > departureDateIso) {
+      break;
+    }
+    selected = arrival;
+  }
+  return selected;
 }
 
 function applyCanonicalTaskCompletionsToEntries(
@@ -3686,6 +3755,11 @@ function buildAssignmentPlan(input: {
       dueDateLabel: formatDate(parseDate(candidate.entry.dateIso)),
       departureDate: departureDateIso,
       departureDateLabel: formatDate(parseDate(departureDateIso)),
+      plannedArrivalDate: candidate.entry.plannedArrivalDateIso,
+      plannedArrivalDateLabel: candidate.entry.plannedArrivalDateIso
+        ? formatDate(parseDate(candidate.entry.plannedArrivalDateIso))
+        : null,
+      plannedArrivalTime: candidate.entry.plannedArrivalTime,
       daysUntilDeparture,
       timeWindow,
       priority: score >= 82 ? "Critical" : score >= 64 ? "High" : "Medium",

@@ -52,9 +52,11 @@ export interface ManualVesselInput {
 const STORAGE_NAMESPACE = "fleet-schedule-example";
 const STORAGE_KEY = `moorings-ms:manual-vessels:${STORAGE_NAMESPACE}`;
 const OVERRIDE_STORAGE_KEY = `moorings-ms:vessel-overrides:${STORAGE_NAMESPACE}`;
+const ARRIVAL_STORAGE_KEY = `moorings-ms:vessel-arrivals:${STORAGE_NAMESPACE}`;
 const LEGACY_STORAGE_PREFIXES = [
   "moorings-ms:manual-vessels:",
   "moorings-ms:vessel-overrides:",
+  "moorings-ms:vessel-arrivals:",
 ];
 const STORAGE_CLEANUP_KEY = `moorings-ms:vessel-storage-cleaned:${STORAGE_NAMESPACE}`;
 const UPDATE_EVENT = "moorings-ms:manual-vessels-updated";
@@ -120,6 +122,9 @@ export function toAssignmentPlanItem(row: ManualVesselRecord): AssignmentPlanIte
     dueDateLabel: formatDateLabel(row.dueDate),
     departureDate: row.dueDate,
     departureDateLabel: formatDateLabel(row.dueDate),
+    plannedArrivalDate: null,
+    plannedArrivalDateLabel: null,
+    plannedArrivalTime: null,
     daysUntilDeparture: daysUntilDateIso(row.dueDate),
     timeWindow: row.timeWindow || "08:00 - 10:00",
     priority: row.priority,
@@ -401,6 +406,15 @@ export interface VesselOverrideRecord {
   updatedAtIso: string;
 }
 
+export type VesselArrivalStatus = "awaiting" | "arrived" | "delayed";
+
+export interface VesselArrivalRecord {
+  taskKey: string;
+  status: VesselArrivalStatus;
+  note?: string;
+  updatedAtIso: string;
+}
+
 export function useVesselOverrides(): Record<string, VesselOverrideRecord> {
   const [overrides, setOverrides] = useState<Record<string, VesselOverrideRecord>>(() => loadVesselOverrides());
 
@@ -426,6 +440,55 @@ export function useVesselOverrides(): Record<string, VesselOverrideRecord> {
   }, []);
 
   return overrides;
+}
+
+export function useVesselArrivalStates(): Record<string, VesselArrivalRecord> {
+  const [arrivals, setArrivals] = useState<Record<string, VesselArrivalRecord>>(() => loadVesselArrivals());
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const sync = () => setArrivals(loadVesselArrivals());
+    const onStorage = (event: StorageEvent) => {
+      if (event.key && event.key !== ARRIVAL_STORAGE_KEY) {
+        return;
+      }
+      sync();
+    };
+
+    window.addEventListener("storage", onStorage);
+    window.addEventListener(UPDATE_EVENT, sync);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener(UPDATE_EVENT, sync);
+    };
+  }, []);
+
+  return arrivals;
+}
+
+export function upsertVesselArrival(input: {
+  taskKey: string;
+  status: VesselArrivalStatus;
+  note?: string;
+}): VesselArrivalRecord | null {
+  const key = normalizeArrivalTaskKey(input.taskKey);
+  if (!key) {
+    return null;
+  }
+
+  const current = loadVesselArrivals();
+  const next: VesselArrivalRecord = {
+    taskKey: key,
+    status: input.status,
+    note: normalizeOptionalText(input.note),
+    updatedAtIso: new Date().toISOString(),
+  };
+  current[key] = next;
+  saveVesselArrivals(current);
+  return next;
 }
 
 export function upsertVesselOverride(input: {
@@ -681,11 +744,55 @@ function loadVesselOverrides(): Record<string, VesselOverrideRecord> {
   }
 }
 
+function loadVesselArrivals(): Record<string, VesselArrivalRecord> {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  clearLegacyVesselStorage();
+
+  try {
+    const raw = window.localStorage.getItem(ARRIVAL_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return {};
+    }
+
+    const normalized: Record<string, VesselArrivalRecord> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, Partial<VesselArrivalRecord>>)) {
+      const taskKey = normalizeArrivalTaskKey(key || value.taskKey || "");
+      const status = normalizeArrivalStatus(value.status);
+      if (!taskKey || !status) {
+        continue;
+      }
+      normalized[taskKey] = {
+        taskKey,
+        status,
+        note: normalizeOptionalText(value.note),
+        updatedAtIso: typeof value.updatedAtIso === "string" ? value.updatedAtIso : new Date().toISOString(),
+      };
+    }
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
 function saveVesselOverrides(overrides: Record<string, VesselOverrideRecord>) {
   if (typeof window === "undefined") {
     return;
   }
   window.localStorage.setItem(OVERRIDE_STORAGE_KEY, JSON.stringify(overrides));
+  window.dispatchEvent(new Event(UPDATE_EVENT));
+}
+
+function saveVesselArrivals(arrivals: Record<string, VesselArrivalRecord>) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(ARRIVAL_STORAGE_KEY, JSON.stringify(arrivals));
   window.dispatchEvent(new Event(UPDATE_EVENT));
 }
 
@@ -701,6 +808,7 @@ function clearLegacyVesselStorage() {
       key &&
       key !== STORAGE_KEY &&
       key !== OVERRIDE_STORAGE_KEY &&
+      key !== ARRIVAL_STORAGE_KEY &&
       LEGACY_STORAGE_PREFIXES.some((prefix) => key.startsWith(prefix))
     ) {
       keysToRemove.push(key);
@@ -731,6 +839,14 @@ function normalizeOptionalText(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed || undefined;
+}
+
+function normalizeArrivalTaskKey(value: string): string {
+  return value.trim();
+}
+
+function normalizeArrivalStatus(value: unknown): VesselArrivalStatus | null {
+  return value === "awaiting" || value === "arrived" || value === "delayed" ? value : null;
 }
 
 function normalizeOptionalDate(value: unknown): string | undefined {

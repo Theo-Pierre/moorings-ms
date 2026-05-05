@@ -938,6 +938,12 @@
   box-shadow: inset 0 0 0 1px rgba(220, 38, 38, 0.4);
 }
 
+.awaitingArrivalRow {
+  border-color: rgba(100, 116, 139, 0.32);
+  background: linear-gradient(120deg, rgba(248, 250, 252, 0.96), rgba(241, 245, 249, 0.92));
+  opacity: 0.86;
+}
+
 .departureDueTodayRow td {
   border-bottom-color: rgba(220, 38, 38, 0.32);
 }
@@ -1007,6 +1013,21 @@
   color: #14532d;
   border-color: rgba(34, 197, 94, 0.33);
   background: rgba(220, 252, 231, 0.92);
+}
+
+.badgeAwaiting {
+  color: #334155;
+  border-color: rgba(100, 116, 139, 0.36);
+  background: rgba(241, 245, 249, 0.96);
+}
+
+.arrivalGatePanel {
+  border-radius: 0.72rem;
+  border: 1px dashed rgba(100, 116, 139, 0.34);
+  background: rgba(255, 255, 255, 0.72);
+  padding: 0.58rem;
+  display: grid;
+  gap: 0.4rem;
 }
 
 .departureCountdownDueToday {
